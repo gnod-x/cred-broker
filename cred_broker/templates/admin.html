@@ -1,35 +1,74 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<link rel="icon" href="/static/icons/ssh.svg" type="image/svg+xml">
-<title>授权中心 · cred-broker</title>
-<link rel="stylesheet" href="/static/console.css">
-<script src="/static/console.js" defer></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <meta name="theme-color" content="#315de9">
+  <link rel="icon" href="/static/brand.svg" type="image/svg+xml">
+  <title>连接目录 · Cred Broker</title>
+  <link rel="preload" href="/static/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/console.css">
+  <script src="/static/console.js" defer></script>
 </head>
-<body>
-<aside class="sidebar">
-  <a class="brand" href="/admin"><span aria-hidden="true">◇</span><div>授权中心<small>cred-broker</small></div></a>
-  <nav aria-label="管理导航">
-    <a href="#catalog">连接目录</a>
-    <a href="#connections">我的连接</a>
-    <a href="#grants">AI 授权</a>
-    <a href="#audit">操作记录</a>
-  </nav>
-  <footer>{% if legacy_enabled %}<a href="/admin/legacy">旧版管理台</a>{% endif %}<form method="post" action="/logout"><button type="submit" class="link">退出登录</button></form></footer>
-</aside>
-<main>
-  <header class="page-header"><div><h1 id="title" tabindex="-1">连接目录</h1><p id="intro">选择服务并创建连接。</p></div><button id="page-action" type="button" hidden></button></header>
-  <p id="notice" role="status" hidden></p>
-  <section id="content" aria-labelledby="title" aria-busy="true"><p>正在加载…</p></section>
-  <noscript>请启用 JavaScript 以使用管理台。</noscript>
-</main>
-<dialog id="dialog" aria-labelledby="dialog-title">
-  <div class="dialog-header"><h2 id="dialog-title"></h2><button id="close-dialog" type="button" class="quiet" aria-label="关闭窗口">×</button></div>
-  <p id="dialog-error" role="alert" hidden></p>
-  <div id="dialog-content"></div>
-</dialog>
+<body class="console">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="/admin" aria-label="Cred Broker 授权中心">
+      <img src="/static/brand.svg" width="34" height="34" alt="">
+      <span class="brand-name">Cred Broker<span class="brand-subtitle">连接与授权，尽在掌握</span></span>
+    </a>
+    <div class="workspace">
+      <span class="workspace-icon" aria-hidden="true"><svg class="ui-icon"><use href="/static/ui-icons.svg#box"></use></svg></span>
+      <div><strong>我的工作空间</strong><span>自托管实例</span></div>
+      <svg class="ui-icon workspace-lock" aria-label="管理员工作空间" role="img"><use href="/static/ui-icons.svg#lock"></use></svg>
+    </div>
+    <p class="nav-label">工作空间</p>
+    <nav aria-label="管理导航">
+      <a href="#catalog"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#grid"></use></svg><span>连接目录</span></a>
+      <a href="#connections"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#link"></use></svg><span>我的连接</span><span id="nav-connections-count" class="nav-count" hidden></span></a>
+      <a href="#grants"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#key"></use></svg><span>AI 授权</span><span id="nav-grants-count" class="nav-count" hidden></span></a>
+      <a href="#audit"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#activity"></use></svg><span>操作记录</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-help">
+        <svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#shield"></use></svg>
+        <strong>权限始终由你管理</strong>
+        <p>为每个 AI 指定资源、工具和有效期，随时撤销访问。</p>
+        <a href="https://github.com/gnod-x/cred-broker#让-ai-调用" target="_blank" rel="noopener noreferrer">了解授权方式<svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#external"></use></svg></a>
+      </div>
+      {% if legacy_enabled %}<a class="legacy-link" href="/admin/legacy">旧版管理台</a>{% endif %}
+      <footer class="account">
+        <span class="avatar" aria-hidden="true">管</span>
+        <div><strong>管理员</strong><span>本地管理会话</span></div>
+        <form method="post" action="/logout"><button type="submit" class="icon-button" aria-label="退出登录" title="退出登录"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#log-out"></use></svg></button></form>
+      </footer>
+    </div>
+  </aside>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="breadcrumbs"><span class="breadcrumb-workspace">工作空间</span><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#chevron-right"></use></svg><span id="breadcrumb">连接目录</span></div>
+      <div class="topbar-actions">
+        <button type="button" class="icon-button" id="refresh-page" aria-label="刷新当前页面" title="刷新当前页面"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#refresh"></use></svg></button>
+        <a class="docs-link" href="https://github.com/gnod-x/cred-broker#readme" target="_blank" rel="noopener noreferrer"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#book"></use></svg><span>使用文档</span></a>
+        <span class="version-label">v0.2.0</span>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <header class="page-header">
+        <div><h1 id="title" tabindex="-1">连接目录</h1><p id="intro">连接你的工具，让 AI 在授权范围内协作。</p></div>
+        <button id="page-action" type="button" hidden></button>
+      </header>
+      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+      <section id="content" aria-labelledby="title" aria-busy="true"><div class="loading-state"><span class="loading-dot"></span>正在载入工作空间…</div></section>
+      <noscript><p class="empty-state">请启用 JavaScript 以使用管理台。</p></noscript>
+      <footer class="workspace-footer"><span>Cred Broker</span><span>开源、自托管的 AI 工具授权中心</span><a href="https://github.com/gnod-x/cred-broker" target="_blank" rel="noopener noreferrer">GitHub<svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#external"></use></svg></a></footer>
+    </main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header"><h2 id="dialog-title"></h2><button id="close-dialog" type="button" class="icon-button" aria-label="关闭窗口" title="关闭窗口"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#close"></use></svg></button></div>
+    <p id="dialog-error" role="alert" hidden></p>
+    <div id="dialog-content"></div>
+  </dialog>
 </body>
 </html>

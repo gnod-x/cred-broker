@@ -1,7 +1,7 @@
 services:
   cred-broker:
     build: .
-    image: ghcr.io/gnod-x/cred-broker:0.1.0
+    image: ghcr.io/gnod-x/cred-broker:0.2.0
     init: true
     restart: unless-stopped
     ports:

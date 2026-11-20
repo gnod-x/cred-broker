@@ -1,4 +1,22 @@
-# v0.1.0 验收记录
+# 验收记录
+
+## v0.2.0 · 界面重构验收
+
+本轮重做登录页与管理工作台的布局、信息层级和交互反馈，并保持连接、授权、MCP 和凭证安全边界。以下项目已在 three 的独立 staging 环境完成：
+
+| 项目 | 当前记录 | 验收范围 |
+|---|---|---|
+| UI / 浏览器 | 通过 | 登录/退出、四页导航、搜索分类、连接创建/测试/删除、授权/复制/撤销、XSS 字符串安全、控制台无错误 |
+| 键盘与无障碍 | 通过 | Escape 关闭、焦点恢复、状态提示、notice 自动关闭；浏览器流程无控制台错误 |
+| 响应式 | 通过 | 375/768/1024/1440px，无页面横向溢出；本地 Manrope 字体加载 |
+| 安全回归 | 通过 | token 不进入 localStorage/sessionStorage，XSS 字符串安全，登录/退出流程通过 |
+| 功能与容器 | 通过 | 7 个核心 test 脚本、Compose hardening/health/auth/persistence/storage/revoke/disconnect |
+| 发布 | 未完成 | v0.2.0 本地 staging 镜像已验证；GitHub tag、CI 发布记录和公开镜像仍待完成 |
+
+使用隔离 fixture 和合成数据；未连接真实 Gmail、GitHub、SSH 或 Instabox 外部账号。测试环境为 three，容器使用本地构建的 `ghcr.io/gnod-x/cred-broker:0.2.0`，健康地址为 `127.0.0.1:8765`。浏览器测试在 `test-results/` 生成截图，目录为临时产物；代表性截图已纳入 `docs/images/console-v020.png`。不要把本地 staging 验收描述为 GitHub 或公开镜像发布成功。
+
+## v0.1.0 · 历史验收
+
 
 日期：2026-11-20。环境：独立 Instabox Linux 测试机，Python 3.13.5、Docker Engine 29.8.2、Compose 5.6.0。测试未访问用户的真实邮箱、GitHub 仓库、SSH 账号或 Instabox 机器授权。
 

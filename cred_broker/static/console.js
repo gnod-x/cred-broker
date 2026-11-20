@@ -20,7 +20,54 @@ const catalog = [
   ["instagram", "Instagram", "◎"],
 ];
 let revision = 0;
-let working = false;
+let dialogGeneration = 0;
+let pageController;
+let noticeTimer;
+const health = new Map();
+const filters = {catalog: {query: "", category: "全部"}, connections: "", grantQuery: "", grants: "全部", audit: {query: "", outcome: "全部"}};
+const providerInfo = {
+  gmail: {category: "邮箱", description: "在明确授权的邮箱中搜索与阅读邮件，让 AI 帮你整理信息。", capabilities: ["搜索邮件", "阅读邮件"], auth: "Google OAuth · 只读"},
+  github: {category: "代码托管", description: "连接 GitHub App，按仓库授予 AI 代码与项目的只读访问。", capabilities: ["查看仓库", "读取文件", "查询议题"], auth: "GitHub App · 只读"},
+  ssh: {category: "远程主机", description: "通过固定主机密钥连接服务器，查询指定服务的状态与日志。", capabilities: ["服务状态", "服务日志"], auth: "SSH 密钥 · 固定主机校验"},
+  instabox: {category: "远程主机", description: "查看指定云机器的状态，可按需开启受限的主机诊断。", capabilities: ["机器状态", "受限诊断"], auth: "API 密钥 · 机器白名单"},
+};
+function icon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("ui-icon"); svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("width", "18"); svg.setAttribute("height", "18");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "/static/ui-icons.svg#" + name); svg.append(use); return svg;
+}
+function providerImage(id) {
+  const img = node("img", undefined, "provider-icon"); img.src = "/static/icons/" + id + ".svg";
+  img.alt = ""; img.width = 40; img.height = 40; return img;
+}
+function tags(values, className = "capability-tags") {
+  const group = node("div", undefined, className);
+  for (const value of values) group.append(node("span", value, "permission-chip"));
+  return group;
+}
+function chips(values, selected, onChange, label) {
+  const group = node("div", undefined, "filter-chips"); group.setAttribute("role", "group"); group.setAttribute("aria-label", label);
+  for (const value of values) {
+    const item = button(value, () => onChange(value), "filter-chip" + (selected === value ? " is-active" : ""));
+    item.setAttribute("aria-pressed", String(selected === value)); group.append(item);
+  } return group;
+}
+function searchField(label, placeholder, value, callback) {
+  const field = node("div", undefined, "search-field"); field.append(icon("search"));
+  const input = node("input", undefined, "search-input"); input.type = "search"; input.placeholder = placeholder;
+  input.setAttribute("aria-label", label); input.value = value; input.addEventListener("input", () => callback(input.value));
+  field.append(input); return field;
+}
+function setPageAction(text, callback, disabled = false) {
+  const action = byId("page-action"); action.replaceChildren(icon("plus"), document.createTextNode(text));
+  action.hidden = false; action.disabled = disabled; action.onclick = callback;
+}
+async function navigate(page) {
+  if (location.hash === "#" + page) await render();
+  else location.hash = page;
+}
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -36,9 +83,9 @@ function button(text, callback, className) {
   return element;
 }
 
-async function api(path, method = "GET", body) {
+async function api(path, method = "GET", body, signal) {
   const response = await fetch("/admin/api/v1" + path, {
-    method, credentials: "same-origin", cache: "no-store",
+    method, credentials: "same-origin", cache: "no-store", signal,
     ...(body === undefined ? {} : {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
@@ -57,16 +104,19 @@ async function api(path, method = "GET", body) {
 
 function notice(text) {
   const element = byId("notice");
+  clearTimeout(noticeTimer);
   element.textContent = text;
   element.hidden = !text;
+  if (text) noticeTimer = setTimeout(() => {element.hidden = true;}, 6000);
 }
 
 function fail(error) {
   dialogError.textContent = error instanceof Error ? error.message : "操作失败，请重试。";
-  dialogError.hidden = false;
+  dialogError.hidden = false; dialogError.tabIndex = -1; dialogError.focus();
 }
 
 function showDialog(title) {
+  dialogGeneration++;
   dialogContent.replaceChildren();
   dialogError.hidden = true;
   byId("dialog-title").textContent = title;
@@ -74,28 +124,30 @@ function showDialog(title) {
 }
 
 function closeDialog() {
-  if (!working) dialog.close();
+  dialogGeneration++; dialogContent.replaceChildren(); dialog.close();
 }
 
+dialog.addEventListener("cancel", () => {dialogGeneration++; dialogContent.replaceChildren();});
 byId("close-dialog").addEventListener("click", closeDialog);
-dialog.addEventListener("cancel", (event) => {
-  if (working) event.preventDefault();
-});
-dialog.addEventListener("close", () => dialogContent.replaceChildren());
+dialog.addEventListener("close", () => { dialogGeneration++; dialogContent.replaceChildren(); });
 
 function submitForm(form, text, action) {
+  let submitting = false;
   const submit = node("button", text);
   submit.type = "submit";
-  form.append(submit);
+  const actions = node("div", undefined, "dialog-actions");
+  actions.append(button("取消", closeDialog, "quiet"), submit); form.append(actions);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (working) return;
-    working = true;
+    if (submitting) return;
+    submitting = true;
+    const generation = dialogGeneration;
     submit.disabled = true;
+    submit.textContent = "正在处理…";
     dialogError.hidden = true;
-    try { await action(new FormData(form)); }
-    catch (error) { fail(error); }
-    finally { working = false; submit.disabled = false; }
+    try { await action(new FormData(form), () => generation === dialogGeneration && dialog.open); }
+    catch (error) { if (generation === dialogGeneration) fail(error); }
+    finally { submitting = false; submit.disabled = false; submit.textContent = text; }
   });
 }
 
@@ -104,6 +156,7 @@ function field(form, name, label, options = {}) {
   const input = node(options.multiline ? "textarea" : "input");
   if (!options.multiline) input.type = options.type || "text";
   input.name = name;
+  input.setAttribute("aria-label", label);
   input.required = options.required !== false;
   input.autocomplete = "off";
   input.spellcheck = false;
@@ -113,6 +166,7 @@ function field(form, name, label, options = {}) {
   if (options.max !== undefined) input.max = options.max;
   wrapper.append(input);
   form.append(wrapper);
+  if (options.help) { const help = node("small", options.help, "field-help"); help.id = "help-" + name; input.setAttribute("aria-describedby", help.id); form.append(help); }
   return input;
 }
 
@@ -123,7 +177,9 @@ function createConnection(provider, oauthEnabled) {
     return;
   }
   const form = node("form");
-  field(form, "label", "连接名称");
+  const context = node("div", undefined, "form-context");
+  context.append(providerImage(provider.id), node("p", providerInfo[provider.id]?.description || provider.name)); form.append(context);
+  field(form, "label", "连接名称", {placeholder: "例如：团队工作空间", help: "使用易辨认的名称，签发授权时会显示此名称。"});
   let config = () => ({});
   const list = (value) => String(value || "").split(/[\n,]+/).map((part) => part.trim()).filter(Boolean);
   if (provider.id === "ssh") {
@@ -156,7 +212,7 @@ function createConnection(provider, oauthEnabled) {
       secret: {read_key: data.get("read_key").trim(), ...(data.get("diagnostic_key").trim() ? {diagnostic_key: data.get("diagnostic_key").trim()} : {})},
     });
   }
-  submitForm(form, provider.id === "gmail" ? "前往 Google 授权" : "创建连接", async (data) => {
+  submitForm(form, provider.id === "gmail" ? "前往 Google 授权" : "创建连接", async (data, isCurrent) => {
     const label = data.get("label").trim();
     if (!label) throw new Error("请输入连接名称。");
     if (provider.id === "gmail") {
@@ -175,8 +231,8 @@ function createConnection(provider, oauthEnabled) {
         form.elements.namedItem(key).value = "";
       }
     }
-    dialog.close();
-    location.hash = "connections";
+    if (isCurrent()) {dialog.close(); await navigate("connections");}
+    else await render();
     notice("连接已创建。");
   });
   dialogContent.append(form);
@@ -189,63 +245,91 @@ function card(title, text) {
   return element;
 }
 
-function empty(text) {
-  content.append(node("p", text, "empty"));
+function empty(text, target = content, action) {
+  const element = node("div", undefined, "empty-state");
+  const mark = node("div", undefined, "empty-state-icon"); mark.append(icon("search"));
+  element.append(mark, node("h2", text));
+  if (action) element.append(button("浏览连接目录", () => navigate("catalog"), "quiet"));
+  target.append(element);
 }
 
 function renderCatalog({providers, google_oauth_enabled: oauthEnabled}, connections) {
-  const grid = node("div", undefined, "grid");
-  for (const [id, defaultName, icon] of catalog) {
-    const provider = providers.find((item) => item.id === id);
-    const supported = Boolean(provider?.supported) && id !== "feishu" && id !== "instagram";
-    const item = card(defaultName, supported ? provider.description : "");
-    const mark = node("img", undefined, "provider-icon");
-    mark.src = "/static/icons/" + id + ".svg";
-    mark.alt = "";
-    mark.width = 44;
-    mark.height = 44;
-    item.prepend(mark);
-    if (supported) {
+  const toolbar = node("div", undefined, "catalog-toolbar");
+  const results = node("div", undefined, "catalog-results");
+  const draw = () => {
+    results.replaceChildren();
+    const chosen = catalog.filter(([id, name]) => {
+      const info = providerInfo[id];
+      return info && (filters.catalog.category === "全部" || info.category === filters.catalog.category) &&
+        [name, info.category, info.description, ...info.capabilities].join(" ").toLowerCase().includes(filters.catalog.query.toLowerCase().trim());
+    });
+    const count = node("p", chosen.length + " 个可连接服务", "result-count"); count.setAttribute("role", "status"); results.append(count);
+    const grid = node("div", undefined, "provider-grid");
+    for (const [id, name] of chosen) {
+      const provider = providers.find(item => item.id === id);
+      const info = providerInfo[id];
+      const item = node("article", undefined, "card provider-card");
+      item.dataset.provider = id;
+      const head = node("div", undefined, "provider-head"); const identity = node("div", undefined, "provider-identity");
+      identity.append(node("h2", name), node("span", info.category, "provider-category"));
+      head.append(providerImage(id), identity);
+      item.append(head, node("p", info.description, "provider-description"), tags(info.capabilities));
+      const footer = node("div", undefined, "provider-footer");
+      const method = node("span", undefined, "auth-method"); method.append(icon("lock"), document.createTextNode(info.auth));
       const actions = node("div", undefined, "actions");
-      actions.append(button("连接", () => createConnection(provider, oauthEnabled)));
-      const existing = connections.filter((connection) => connection.provider === id);
-      if (existing.length === 1) actions.append(button("测试", () => testConnection(existing[0]), "quiet"));
-      if (existing.length > 1) {
-        actions.append(button("选择连接并测试", () => {
-          showDialog("测试 " + defaultName);
-          const choices = node("div", undefined, "list");
-          for (const connection of existing) choices.append(button(connection.label, () => testConnection(connection), "quiet"));
-          dialogContent.append(choices);
-        }, "quiet"));
-      }
-      item.append(actions);
-    } else item.append(node("span", "暂不支持", "badge"));
-    grid.append(item);
+      const connect = button("连接", () => createConnection({...provider, id, name}, oauthEnabled)); connect.disabled = !provider?.supported;
+      actions.append(connect);
+      const existing = connections.filter(connection => connection.provider === id);
+      if (existing.length) actions.append(button(existing.length === 1 ? "测试" : "选择连接并测试", () => {
+        if (existing.length === 1) return testConnection(existing[0]);
+        showDialog("测试 " + name); const choices = node("div", undefined, "list");
+        for (const connection of existing) choices.append(button(connection.label, () => testConnection(connection), "quiet"));
+        dialogContent.append(choices);
+      }, "quiet"));
+      footer.append(method, actions); item.append(footer); grid.append(item);
+    }
+    if (!chosen.length) empty("没有匹配的服务，试试其他关键词。", grid);
+    results.append(grid);
+  };
+  toolbar.append(searchField("搜索服务", "搜索服务或用途", filters.catalog.query, value => {filters.catalog.query = value; draw();}));
+  const chipContainer = node("div");
+  const drawChips = () => chipContainer.replaceChildren(chips(["全部", "邮箱", "代码托管", "远程主机"], filters.catalog.category, value => {filters.catalog.category = value; drawChips(); draw();}, "服务类别"));
+  drawChips(); toolbar.append(chipContainer);
+  content.append(toolbar, results); draw();
+  const future = node("section", undefined, "future-section"); future.append(node("h2", "更多服务，陆续接入"));
+  const futureGrid = node("div", undefined, "future-grid");
+  for (const [id, name] of catalog.filter(([id]) => !providerInfo[id])) {
+    const item = node("article", undefined, "future-card"); item.append(providerImage(id), node("h2", name), node("span", "暂不支持", "badge")); futureGrid.append(item);
   }
-  content.append(grid);
+  future.append(futureGrid); content.append(future);
+  const note = node("aside", undefined, "permission-note"); note.append(icon("shield"), node("p", "连接只是第一步。AI 只能使用你随后明确授权的资源与工具，原始服务凭证不会提供给 AI。")); content.append(note);
 }
 
 async function testConnection(connection) {
-  if (working) return;
+  if (health.get(connection.id)?.testing) return;
   showDialog("测试 " + connection.label);
-  working = true;
-  dialogContent.append(node("p", "正在测试连接…"));
+  const generation = dialogGeneration;
+  health.set(connection.id, {testing: true});
+  dialogContent.append(node("p", "正在测试连接…", "loading-state"));
   try {
     const {ok} = await api("/connections/" + encodeURIComponent(connection.id) + "/test", "POST");
-    dialogContent.replaceChildren(node("p", ok ? "连接测试通过。" : "连接测试未通过，请检查服务配置和凭证。"));
+    health.set(connection.id, {ok, checkedAt: Date.now()});
+    if (generation === dialogGeneration) dialogContent.replaceChildren(node("p", ok ? "连接测试通过。" : "连接测试未通过，请检查服务配置和凭证。"));
+    void render();
   } catch (error) {
-    dialogContent.replaceChildren();
-    fail(error);
-  } finally { working = false; }
+    if (generation === dialogGeneration) {dialogContent.replaceChildren(); fail(error);}
+  } finally {
+    if (health.get(connection.id)?.testing) health.delete(connection.id);
+  }
 }
 
 function confirmAction(title, description, action, success) {
   showDialog(title);
   const form = node("form");
-  form.append(node("p", description));
-  submitForm(form, "确认", async () => {
+  form.append(node("p", description, "form-context"));
+  submitForm(form, "确认", async (_data, isCurrent) => {
     await action();
-    dialog.close();
+    if (isCurrent()) dialog.close();
     await render();
     notice(success);
   });
@@ -253,29 +337,36 @@ function confirmAction(title, description, action, success) {
 }
 
 function renderConnections(connections) {
-  if (!connections.length) return empty("还没有连接。请在连接目录中选择服务。");
-  const list = node("div", undefined, "list");
-  for (const connection of connections) {
-    const service = catalog.find(([id]) => id === connection.provider);
-    const item = card(connection.label, service?.[1] || connection.provider);
-    const resources = connection.resources.map((entry) => entry.label).join("、");
-    item.append(node("p", resources ? "资源：" + resources : "暂无可授权资源。"));
-    const actions = node("div", undefined, "actions");
-    actions.append(
-      button("测试连接", () => testConnection(connection), "quiet"),
-      button("删除连接", () => confirmAction("删除连接", "确定删除「" + connection.label + "」？", () => api("/connections/" + encodeURIComponent(connection.id), "DELETE"), "连接已删除。"), "danger"),
-    );
-    item.append(actions);
-    list.append(item);
+  setPageAction("添加连接", () => navigate("catalog"));
+  if (!connections.length) return empty("还没有连接，先选择一个服务。", content, true);
+  const list = node("div", undefined, "connection-list");
+  const draw = () => {
+  list.replaceChildren();
+  const visible = connections.filter(connection => [connection.label, connection.provider, ...connection.resources.map(resource => resource.label)].join(" ").toLowerCase().includes(filters.connections.toLowerCase().trim()));
+  for (const connection of visible) {
+    const info = providerInfo[connection.provider]; const name = catalog.find(([id]) => id === connection.provider)?.[1] || connection.provider;
+    const item = node("article", undefined, "card connection-row");
+    const main = node("div", undefined, "connection-main"); main.append(node("h2", connection.label));
+    const meta = node("div", undefined, "connection-meta"); meta.append(node("span", name), node("span", "创建于 " + date(connection.created_at)));
+    const state = health.get(connection.id);
+    const status = node("span", state ? state.ok ? "测试通过" : "测试失败" : "已连接（配置）", "status-badge " + (state ? state.ok ? "status-healthy" : "status-error" : "status-configured"));
+    main.append(meta, tags(connection.resources.map(entry => entry.label), "connection-resources"));
+    const actions = node("div", undefined, "actions connection-actions");
+    actions.append(button("测试连接", () => testConnection(connection), "quiet"),
+      button("删除连接", () => confirmAction("删除连接", "确定删除「" + connection.label + "」？关联授权将无法再接纳新的调用，已接纳的操作可能继续完成。", () => api("/connections/" + encodeURIComponent(connection.id), "DELETE"), "连接已删除。"), "danger"));
+    item.append(providerImage(connection.provider), main, status, actions); list.append(item);
   }
-  content.append(list);
+  if (!visible.length) empty("没有匹配的连接。", list);
+  };
+  content.append(searchField("搜索连接", "搜索连接名称或资源", filters.connections, value => {filters.connections = value; draw();}), node("p", connections.length + " 个已配置连接", "result-count"), list);
+  draw();
 }
 
 function showToken(token) {
   showDialog("网关令牌已签发");
   dialogContent.append(node("p", "令牌仅在此窗口显示一次。请复制并保管，关闭后无法再次查看。"));
   const label = node("label", "网关令牌");
-  const input = node("input", undefined, "secret-value");
+  const input = node("input", undefined, "secret-value token-input");
   input.readOnly = true;
   input.autocomplete = "off";
   input.spellcheck = false;
@@ -292,7 +383,10 @@ function showToken(token) {
       status.textContent = "无法访问剪贴板，请手动复制选中的令牌。";
     }
   }), status);
-  input.focus();
+  const instructions = node("div", undefined, "mcp-instructions");
+  instructions.append(node("h3", "连接到 AI 客户端"), node("p", "将以下地址设为 Streamable HTTP MCP 服务，认证方式选择 Bearer，并使用上方网关令牌。"));
+  const gateway = node("code", location.origin + "/mcp"); instructions.append(gateway);
+  dialogContent.append(instructions); input.focus();
 }
 
 function checkboxGroup(title, name, entries) {
@@ -316,7 +410,8 @@ function checkboxGroup(title, name, entries) {
 function createGrant(connections) {
   showDialog("签发 AI 授权");
   const form = node("form");
-  field(form, "client", "AI 客户端名称");
+  form.append(node("p", "仅选择完成当前任务所需的资源与工具，授权到期后令牌自动失效。", "form-context"));
+  field(form, "client", "AI 客户端名称", {placeholder: "例如：项目维护助手"});
   const label = node("label", "连接");
   const select = node("select");
   select.setAttribute("aria-label", "连接");
@@ -349,13 +444,14 @@ function createGrant(connections) {
   }
   ttlLabel.append(ttl);
   form.append(ttlLabel);
-  submitForm(form, "签发令牌", async (data) => {
+  submitForm(form, "签发令牌", async (data, isCurrent) => {
     const client = data.get("client").trim();
     const resources = data.getAll("resource");
     const tools = data.getAll("tool");
     if (!client || !resources.length || !tools.length) throw new Error("请填写客户端名称，并至少选择一个资源和一个工具。");
     const {token} = await api("/grants", "POST", {client, connection_id: select.value, resources, tools, ttl_seconds: Number(data.get("ttl"))});
-    showToken(token);
+    if (isCurrent()) showToken(token);
+    else notice("授权已签发，但令牌窗口已取消；请撤销该授权并重新签发。");
     void render();
   });
   dialogContent.append(form);
@@ -365,59 +461,78 @@ function date(seconds) {
   return seconds == null ? "—" : new Date(seconds * 1000).toLocaleString("zh-CN");
 }
 
-function renderGrants(grants, connections) {
-  const pageAction = byId("page-action");
-  pageAction.textContent = "新建授权";
-  pageAction.hidden = false;
-  pageAction.disabled = !connections.length;
-  pageAction.onclick = () => createGrant(connections);
-  if (!grants.length) return empty(connections.length ? "还没有 AI 授权。" : "请先创建一个连接，再签发 AI 授权。");
-  const list = node("div", undefined, "list");
-  for (const grant of grants) {
-    const connection = connections.find((item) => String(item.id) === String(grant.connection_id));
-    const revoked = grant.revoked_at != null;
-    const expired = grant.expires_at <= Date.now() / 1000;
-    const item = card(grant.client, connection?.label || "连接已删除");
-    item.append(
-      node("span", revoked ? "已撤销" : expired ? "已过期" : "有效", "badge"),
-      node("p", "资源：" + grant.resources.join("、")),
-      node("p", "工具：" + grant.tools.join("、")),
-      node("p", "到期时间：" + date(grant.expires_at)),
-    );
-    if (!revoked && !expired) item.append(button("撤销授权", () => confirmAction("撤销授权", "撤销后该令牌将立即失效。", () => api("/grants/" + encodeURIComponent(grant.id) + "/revoke", "POST"), "授权已撤销。"), "danger"));
-    list.append(item);
-  }
-  content.append(list);
+function grantState(grant) {
+  return grant.revoked_at != null ? "已撤销" : grant.expires_at <= Date.now() / 1000 ? "已过期" : "有效";
 }
 
-function renderAudit(audit, connections) {
-  if (!audit.length) return empty("暂无操作记录。");
-  const wrap = node("div", undefined, "table-wrap");
-  wrap.tabIndex = 0;
-  wrap.setAttribute("role", "region");
-  wrap.setAttribute("aria-label", "操作记录表格");
-  const table = node("table");
-  const head = table.createTHead().insertRow();
-  for (const label of ["时间", "客户端", "操作", "连接", "资源", "结果"]) {
-    const cell = node("th", label);
-    cell.scope = "col";
-    head.append(cell);
-  }
-  const body = table.createTBody();
-  const outcomes = {ok: "成功", success: "成功", denied: "已拒绝", error: "失败", failed: "失败"};
-  for (const entry of audit) {
-    const row = body.insertRow();
-    const connection = connections.find((item) => String(item.id) === String(entry.connection_id));
-    for (const value of [date(entry.ts), entry.client, entry.action, connection?.label || entry.connection_id, entry.resource, outcomes[entry.outcome] ?? entry.outcome]) {
-      row.append(node("td", value ?? "—"));
+function renderGrants(grants, connections) {
+  setPageAction("新建授权", () => createGrant(connections), !connections.length);
+  if (!grants.length) return empty(connections.length ? "还没有 AI 授权，请按任务需要签发。" : "请先创建连接，再签发 AI 授权。", content, !connections.length);
+  const controls = node("div", undefined, "catalog-toolbar"); const list = node("div", undefined, "grant-list");
+  const draw = () => {
+    list.replaceChildren();
+    const selected = grants.filter(grant => (filters.grants === "全部" || grantState(grant) === filters.grants) && [grant.client, connections.find(connection => String(connection.id) === String(grant.connection_id))?.label, ...grant.resources, ...grant.tools].join(" ").toLowerCase().includes(filters.grantQuery.toLowerCase().trim()));
+    for (const grant of selected) {
+      const connection = connections.find(item => String(item.id) === String(grant.connection_id));
+      const state = grantState(grant); const item = node("article", undefined, "card grant-card");
+      const head = node("div", undefined, "grant-head"); const identity = node("div");
+      identity.append(node("h2", grant.client), node("p", connection?.label || "连接已删除", "grant-meta"));
+      const statusClass = state === "有效" ? "status-healthy" : state === "已过期" ? "status-expired" : "status-revoked";
+      head.append(identity, node("span", state, "status-badge " + statusClass));
+      const scope = node("div", undefined, "grant-scope"); scope.append(node("span", "资源", "scope-label"), tags(grant.resources.map(id => connection?.resources.find(resource => resource.id === id)?.label || id)), node("span", "工具", "scope-label"), tags(grant.tools));
+      const meta = node("p", "签发于 " + date(grant.created_at) + " · 到期时间：" + date(grant.expires_at), "grant-meta");
+      item.append(head, scope, meta);
+      if (state === "有效") {
+        const actions = node("div", undefined, "actions");
+        actions.append(button("撤销授权", () => confirmAction("撤销授权", "撤销后该令牌将立即拒绝新的调用；已接纳的操作可能继续完成。", () => api("/grants/" + encodeURIComponent(grant.id) + "/revoke", "POST"), "授权已撤销。"), "danger"));
+        item.append(actions);
+      }
+      list.append(item);
     }
+    if (!selected.length) empty("当前状态下没有授权。", list);
+    controls.replaceChildren(chips(["全部", "有效", "已过期", "已撤销"], filters.grants, value => {filters.grants = value; draw();}, "授权状态"));
+  };
+  content.append(searchField("搜索授权", "搜索客户端、资源或工具", filters.grantQuery, value => {filters.grantQuery = value; draw();}), controls, list); draw();
+}
+const actionNames = {
+  "connection.create": "创建连接", "connection.created": "创建连接", "connection.test": "测试连接", "connection.delete": "删除连接", "connection.disconnect": "删除连接",
+  "connection_create": "创建连接", "connection_test": "测试连接", "connection_delete": "删除连接", "grant_create": "签发授权", "grant_revoke": "撤销授权", "grant.create": "签发授权", "grant.revoke": "撤销授权", "gmail.search": "搜索邮件", "gmail.read": "阅读邮件",
+  "ssh.status": "查询服务状态", "ssh.logs": "读取服务日志", "github.repositories": "查看仓库", "github.file": "读取仓库文件",
+  "github.issues": "查询议题", "instabox.describe": "查询机器状态", "instabox.diagnostics": "运行受限诊断",
+};
+const outcomes = {ok: "成功", success: "成功", denied: "已拒绝", error: "失败", failed: "失败"};
+function renderAudit(audit, connections) {
+  const toolbar = node("div", undefined, "audit-toolbar");
+  const holder = node("div"); const resultFilter = node("div");
+  function draw() {
+    holder.replaceChildren();
+    const entries = audit.filter(entry => {
+      const connection = connections.find(item => String(item.id) === String(entry.connection_id));
+      const outcome = outcomes[entry.outcome] || entry.outcome;
+      return (filters.audit.outcome === "全部" || outcome === filters.audit.outcome) &&
+        [entry.client, entry.action, actionNames[entry.action], connection?.label, entry.resource, outcome].join(" ").toLowerCase().includes(filters.audit.query.trim().toLowerCase());
+    });
+    resultFilter.replaceChildren(chips(["全部", "成功", "已拒绝", "失败"], filters.audit.outcome, value => {filters.audit.outcome = value; draw();}, "操作结果"));
+    if (!entries.length) return empty(audit.length ? "没有匹配的操作记录。" : "暂无操作记录。", holder);
+    const wrap = node("div", undefined, "table-wrap"); wrap.tabIndex = 0; wrap.setAttribute("role", "region"); wrap.setAttribute("aria-label", "操作记录表格");
+    const table = node("table"); const head = table.createTHead().insertRow();
+    for (const label of ["时间", "客户端", "操作", "连接", "资源", "结果"]) {const cell = node("th", label); cell.scope = "col"; head.append(cell);}
+    const body = table.createTBody();
+    for (const entry of entries) {
+      const row = body.insertRow(); const connection = connections.find(item => String(item.id) === String(entry.connection_id));
+      for (const value of [date(entry.ts), entry.client, actionNames[entry.action] || entry.action, connection?.label || entry.connection_id, entry.resource, outcomes[entry.outcome] || entry.outcome]) row.append(node("td", value ?? "—"));
+    }
+    wrap.append(table); holder.append(node("p", entries.length + " 条操作记录", "result-count"), wrap);
   }
-  wrap.append(table);
-  content.append(wrap);
+  toolbar.append(searchField("搜索操作记录", "搜索客户端、操作或资源", filters.audit.query, value => {filters.audit.query = value; draw();}), resultFilter);
+  content.append(toolbar, holder); draw();
 }
 
 async function render(focus = false) {
   const id = ++revision;
+  pageController?.abort(); pageController = new AbortController();
+  const signal = pageController.signal;
+  const refresh = byId("refresh-page"); if (refresh) refresh.disabled = true;
   const hash = location.hash.slice(1);
   const page = Object.hasOwn(pages, hash) ? hash : "catalog";
   for (const link of document.querySelectorAll("nav a")) {
@@ -427,17 +542,27 @@ async function render(focus = false) {
   const title = byId("title");
   title.textContent = pages[page][0];
   byId("intro").textContent = pages[page][1];
+  if (byId("breadcrumb")) byId("breadcrumb").textContent = pages[page][0];
   byId("page-action").hidden = true;
   if (focus) title.focus();
   content.setAttribute("aria-busy", "true");
-  content.replaceChildren(node("p", "正在加载…"));
+  content.replaceChildren(node("p", "正在加载…", "loading-state"));
   try {
     const [data, {connections}] = await Promise.all([
-      page === "catalog" ? api("/providers") : page === "grants" || page === "audit" ? api("/" + page) : {},
-      api("/connections"),
+      page === "catalog" ? api("/providers", "GET", undefined, signal) : page === "grants" || page === "audit" ? api("/" + page, "GET", undefined, signal) : {},
+      api("/connections", "GET", undefined, signal),
     ]);
     if (id !== revision) return;
     content.replaceChildren();
+    if (byId("nav-connections-count")) {
+      byId("nav-connections-count").textContent = connections.length;
+      byId("nav-connections-count").hidden = connections.length === 0;
+    }
+    if (page === "grants" && byId("nav-grants-count")) {
+      const activeGrants = data.grants.filter(grant => grantState(grant) === "有效").length;
+      byId("nav-grants-count").textContent = activeGrants;
+      byId("nav-grants-count").hidden = activeGrants === 0;
+    }
     if (page === "catalog") renderCatalog(data, connections);
     else if (page === "connections") renderConnections(connections);
     else if (page === "grants") renderGrants(data.grants, connections);
@@ -448,10 +573,14 @@ async function render(focus = false) {
     message.setAttribute("role", "alert");
     content.replaceChildren(message, button("重试", () => render(), "quiet"));
   } finally {
-    if (id === revision) content.setAttribute("aria-busy", "false");
+    if (id === revision) {
+      content.setAttribute("aria-busy", "false");
+      if (refresh) refresh.disabled = false;
+    }
   }
 }
 
+byId("refresh-page")?.addEventListener("click", () => render());
 window.addEventListener("hashchange", () => render(true));
 const oauthResult = new URLSearchParams(location.search).get("google");
 const oauthMessages = {connected: "Gmail 连接已完成，可在「我的连接」中测试。", failed: "Gmail 授权失败，请重新连接。", cancelled: "已取消 Gmail 授权。"};

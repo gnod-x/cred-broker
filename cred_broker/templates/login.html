@@ -1,22 +1,43 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>登录授权中心 · cred-broker</title>
-<link rel="icon" href="/static/icons/ssh.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/console.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <meta name="theme-color" content="#315de9">
+  <title>管理员登录 · Cred Broker</title>
+  <link rel="icon" href="/static/brand.svg" type="image/svg+xml">
+  <link rel="preload" href="/static/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/console.css">
 </head>
 <body class="login">
-<main class="login-card">
-  <div class="brand"><span aria-hidden="true">◇</span><div>授权中心<small>cred-broker</small></div></div>
-  <h1>管理员登录</h1>
-  <p>使用部署时设置的管理令牌登录。</p>
-  {% if error %}<p role="alert">{{ error }}</p>{% endif %}
-  <form method="post" action="/login">
-    <label>管理令牌<input name="token" type="password" required autofocus autocomplete="current-password"></label>
-    <button type="submit">登录</button>
-  </form>
-</main>
+  <header class="login-header"><a class="brand" href="/"><img src="/static/brand.svg" width="36" height="36" alt=""><span class="brand-name">Cred Broker</span></a><a class="docs-link" href="https://github.com/gnod-x/cred-broker" target="_blank" rel="noopener noreferrer">GitHub<svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#external"></use></svg></a></header>
+  <main class="login-layout">
+    <section class="login-story" aria-labelledby="login-intro">
+      <span class="intro-tag"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#shield"></use></svg>你的工具，你的权限</span>
+      <h1 id="login-intro">让 AI 连接工具。<br>让权限始终可控。</h1>
+      <p class="login-description">连接邮箱、代码仓库和远程主机。<br>把恰好的权限交给 AI，把控制权留给自己。</p>
+      <div class="connection-illustration" aria-label="通过 Cred Broker 将 Gmail、GitHub、SSH 与 Instabox 连接给 AI">
+        <div class="illustration-services"><span><img src="/static/icons/gmail.svg" width="24" height="24" alt="">Gmail</span><span><img src="/static/icons/github.svg" width="24" height="24" alt="">GitHub</span><span><img src="/static/icons/ssh.svg" width="24" height="24" alt="">SSH</span><span><img src="/static/icons/instabox.svg" width="24" height="24" alt="">Instabox</span></div>
+        <div class="illustration-broker"><span class="connection-line" aria-hidden="true"></span><img src="/static/brand.svg" width="56" height="56" alt=""><span class="connection-line" aria-hidden="true"></span></div>
+        <div class="illustration-grant"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#key"></use></svg><span>AI 受控访问<small>限定资源 · 限定工具 · 限定有效期</small></span><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#check"></use></svg></div>
+      </div>
+      <div class="login-points"><span><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#lock"></use></svg>凭证加密保管</span><span><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#refresh"></use></svg>授权随时撤销</span><span><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#activity"></use></svg>操作有迹可查</span></div>
+    </section>
+    <section class="login-card" aria-labelledby="login-title">
+      <span class="login-key"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#key"></use></svg></span>
+      <h2 id="login-title">管理员登录</h2>
+      <p>欢迎回来，管理你的连接与 AI 授权。</p>
+      {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/login">
+        <label for="admin-token">管理令牌</label>
+        <input id="admin-token" name="token" type="password" placeholder="输入你的管理令牌" required autocomplete="current-password" aria-describedby="token-help">
+        <p id="token-help" class="field-help">使用部署时设置的管理令牌。</p>
+        <button type="submit">登录<svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#arrow"></use></svg></button>
+      </form>
+      <div class="login-help"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#book"></use></svg><span>首次部署？<a href="https://github.com/gnod-x/cred-broker#用-docker-compose-部署" target="_blank" rel="noopener noreferrer">查看部署说明</a></span></div>
+    </section>
+  </main>
+  <footer class="login-footer"><span>开源、自托管的 AI 工具授权中心</span><span>v0.2.0</span></footer>
 </body>
 </html>
