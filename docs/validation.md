@@ -11,9 +11,11 @@
 | 响应式 | 通过 | 375/768/1024/1440px，无页面横向溢出；本地 Manrope 字体加载 |
 | 安全回归 | 通过 | token 不进入 localStorage/sessionStorage，XSS 字符串安全，登录/退出流程通过 |
 | 功能与容器 | 通过 | 7 个核心 test 脚本、Compose hardening/health/auth/persistence/storage/revoke/disconnect |
-| 发布 | 未完成 | v0.2.0 本地 staging 镜像已验证；GitHub tag、CI 发布记录和公开镜像仍待完成 |
+| 发布 | 通过 | `v0.2.0` tag、main / release CI 和 GHCR `0.2.0` 公开镜像均已完成；镜像索引含 Linux amd64 |
 
-使用隔离 fixture 和合成数据；未连接真实 Gmail、GitHub、SSH 或 Instabox 外部账号。测试环境为 three，容器使用本地构建的 `ghcr.io/gnod-x/cred-broker:0.2.0`，健康地址为 `127.0.0.1:8765`。浏览器测试在 `test-results/` 生成截图，目录为临时产物；代表性截图已纳入 `docs/images/console-v020.png`。不要把本地 staging 验收描述为 GitHub 或公开镜像发布成功。
+使用隔离 fixture 和合成数据；未连接真实 Gmail、GitHub、SSH 或 Instabox 外部账号。测试环境为 three，容器先以本地构建镜像验收，发布后又切换到公开的 `ghcr.io/gnod-x/cred-broker:0.2.0` 做健康与容器最小回归，健康地址为 `127.0.0.1:8765`。浏览器测试在 `test-results/` 生成截图，目录为临时产物；代表性截图已纳入 `docs/images/console-v020.png`。GHCR manifest digest 为 `sha256:2614b4e5b37ac99d9a81ebcb0d4867e1b81551ec4b42ecfaf302b65c581b190b`。
+
+发布证据：[main 测试](https://github.com/gnod-x/cred-broker/actions/runs/44774747022)、[v0.2.0 容器发布](https://github.com/gnod-x/cred-broker/actions/runs/44775054799)。仓库已推送 `v0.2.0` tag；当前 workflow 不自动创建 GitHub Release 页面。
 
 ## v0.1.0 · 历史验收
 

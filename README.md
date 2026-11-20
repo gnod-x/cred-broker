@@ -6,7 +6,7 @@
 
 ![v0.2.0 连接目录与服务授权入口](docs/images/console-v020.png)
 
-**v0.2.0 已完成隔离环境验收**，包含新版管理台、浏览器交互、响应式布局和 Compose 安全回归。GitHub tag、公开镜像发布和 CI 发布记录尚未完成；不要把本地 staging 镜像当作公开发布。版本状态和可复现范围见 [验收记录](docs/validation.md)。
+**v0.2.0 已完成隔离环境验收并发布**，包含新版管理台、浏览器交互、响应式布局和 Compose 安全回归。`main` 与 `v0.2.0` 的 GitHub Actions 检查通过，公开镜像已发布到 GHCR。版本状态和可复现范围见 [验收记录](docs/validation.md)。
 
 ## 已实现
 
@@ -22,7 +22,7 @@
 
 ## 用 Docker Compose 部署
 
-需要 Docker Engine 和 Compose v2。当前已发布的 v0.1.0 公开镜像支持 Linux amd64；v0.2.0 目前只有本地 staging 验收结果，尚未发布到 GitHub 或公开镜像仓库。按下方步骤部署会拉取 Compose 配置指定的版本；运行时只访问所连接的上游服务。
+需要 Docker Engine 和 Compose v2。当前 Compose 配置使用已验证的 v0.2.0 公开镜像，支持 Linux amd64；运行时只访问所连接的上游服务。
 
 ```bash
 git clone https://github.com/gnod-x/cred-broker.git
