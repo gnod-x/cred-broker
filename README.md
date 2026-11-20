@@ -6,7 +6,7 @@
 
 ![v0.2.0 连接目录与服务授权入口](docs/images/console-v020.png)
 
-**v0.2.0 已完成隔离环境验收并发布**，包含新版管理台、浏览器交互、响应式布局和 Compose 安全回归。`main` 与 `v0.2.0` 的 GitHub Actions 检查通过，公开镜像已发布到 GHCR。版本状态和可复现范围见 [验收记录](docs/validation.md)。
+**v0.2.0 已完成隔离环境验收并发布。** 当前 `main` 增加 v0.2.1 反向代理来源校验修复：配置精确的 `CB_PUBLIC_ORIGIN` 后，可通过 HTTPS 域名登录管理台，同时保留来源校验和 Secure Cookie。v0.2.1 的 CI、镜像与 staging 状态见 [验收记录](docs/validation.md)。
 
 ## 已实现
 
@@ -22,7 +22,7 @@
 
 ## 用 Docker Compose 部署
 
-需要 Docker Engine 和 Compose v2。当前 Compose 配置使用已验证的 v0.2.0 公开镜像，支持 Linux amd64；运行时只访问所连接的上游服务。
+需要 Docker Engine 和 Compose v2。Compose 配置固定公开镜像版本，支持 Linux amd64；运行时只访问所连接的上游服务。发布状态见 [验收记录](docs/validation.md)。
 
 ```bash
 git clone https://github.com/gnod-x/cred-broker.git
@@ -41,7 +41,7 @@ docker compose ps
 ssh -N -L 8765:127.0.0.1:8765 your-user@your-server
 ```
 
-需要域名时，在可信 HTTPS 反向代理后部署，同时让代理访问内部端口。只信任实际代理的转发头；不要无条件信任公网客户端传来的 `X-Forwarded-*`。管理员页面与 MCP 共用服务端口，使用不同认证。
+需要域名时，在可信 HTTPS 反向代理后部署，同时让代理访问内部端口。设置 `CB_PUBLIC_ORIGIN` 为精确的外部 origin（例如 `https://broker.example.com`），以保持管理写请求的同源校验和 Secure 会话 Cookie；不要无条件信任公网客户端传来的 `X-Forwarded-*`。管理员页面与 MCP 共用服务端口，使用不同认证。
 
 镜像以 UID/GID 10001 运行，根文件系统只读、不挂载宿主机 home、Docker socket 或 SSH agent，数据存在命名 volume `broker-data`。镜像附带校验 SHA-512 后安装的官方 Instabox CLI；不会导入宿主机现有 Instabox 登录。
 
@@ -133,6 +133,7 @@ curl -sS http://localhost:8765/mcp \
 | `CB_ADMIN_TOKEN` | 必填，独立随机管理令牌 |
 | `CB_DATA_DIR` | `/var/lib/cred-broker`，数据库和主密钥 |
 | `CB_BIND` | 源码运行 `127.0.0.1:8765`；容器内部 `0.0.0.0:8765` |
+| `CB_PUBLIC_ORIGIN` | 默认空；TLS 反向代理时设为精确的外部 origin，如 `https://broker.example.com` |
 | `CB_GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI` | 三项同时配置才开启 Gmail OAuth |
 | `CB_INSTABOX_CLI` | `/usr/local/bin/instabox`，由管理员指定的可执行文件 |
 | `CB_ENABLE_LEGACY` | 默认 false，仅迁移时按需启用旧管理和旧 HTTP 调用 |

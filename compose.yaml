@@ -1,7 +1,7 @@
 services:
   cred-broker:
     build: .
-    image: ghcr.io/gnod-x/cred-broker:0.2.0
+    image: ghcr.io/gnod-x/cred-broker:0.2.1
     init: true
     restart: unless-stopped
     ports:
@@ -11,6 +11,7 @@ services:
       CB_GOOGLE_CLIENT_ID: "${CB_GOOGLE_CLIENT_ID:-}"
       CB_GOOGLE_CLIENT_SECRET: "${CB_GOOGLE_CLIENT_SECRET:-}"
       CB_GOOGLE_REDIRECT_URI: "${CB_GOOGLE_REDIRECT_URI:-}"
+      CB_PUBLIC_ORIGIN: "${CB_PUBLIC_ORIGIN:-}"
     volumes:
       - broker-data:/var/lib/cred-broker
     read_only: true

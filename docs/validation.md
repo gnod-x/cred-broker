@@ -1,5 +1,18 @@
 # 验收记录
 
+## v0.2.1 · TLS 反向代理登录修复
+
+日期：2026-11-21。修复 HTTPS 反向代理把请求转发为内部 HTTP 后，管理登录 POST 因外部 `Origin` 与应用内部来源不同而返回 403 的问题。新增 `CB_PUBLIC_ORIGIN` 精确配置；管理写请求规范化比较配置来源与内部来源，不依赖任意 `X-Forwarded-*`。外部 HTTPS 配置下登录与注销 Cookie 保持 Secure。
+
+| 验证 | 本地结果 | 范围 |
+|---|---|---|
+| 管理 API | 通过 | 代理 Origin 登录、管理 POST 来源、恶意来源与畸形来源拒绝、Secure 登录/注销 Cookie、非法配置拒绝 |
+| 核心与 provider 回归 | 通过 | `test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py` |
+| 官方 MCP SDK | 通过 | `test_mcp_sdk.py` 回环协议验证 |
+| GitHub CI、GHCR 镜像与 three staging | 待完成 | 发布后更新此记录 |
+
+`CB_PUBLIC_ORIGIN` 必须是无路径的 HTTP(S) origin，例如 `https://broker.example.com`。通过 HTTPS 反向代理部署时，在 Compose 环境文件设置该值。GitHub CI、镜像与 three staging 的最终结果将在发布后补录。
+
 ## v0.2.0 · 界面重构验收
 
 本轮重做登录页与管理工作台的布局、信息层级和交互反馈，并保持连接、授权、MCP 和凭证安全边界。以下项目已在 three 的独立 staging 环境完成：

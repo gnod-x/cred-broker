@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
-import json
 import inspect
+import ipaddress
+import json
+import re
 import secrets
 import time
 from pathlib import Path
@@ -30,6 +32,57 @@ from .mcp import register_mcp
 from .store import MasterKey, Store
 
 HERE = Path(__file__).parent
+
+
+def _canonical_origin(value: str) -> str:
+    if not value or value != value.strip() or any(char.isspace() or ord(char) < 0x21 for char in value):
+        raise ValueError("invalid origin")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("invalid origin") from exc
+    if (parsed.scheme.lower() not in {"http", "https"} or not hostname or not parsed.netloc
+            or "@" in parsed.netloc or parsed.username is not None or parsed.password is not None
+            or parsed.path or parsed.query or parsed.fragment or "?" in value or "#" in value
+            or parsed.netloc.endswith(":")):
+        raise ValueError("invalid origin")
+    if port is not None and port == 0:
+        raise ValueError("invalid origin port")
+    scheme = parsed.scheme.lower()
+    if ":" in hostname:
+        if "%" in hostname:
+            raise ValueError("invalid IPv6 origin")
+        try:
+            host = f"[{ipaddress.IPv6Address(hostname).compressed}]"
+        except ValueError as exc:
+            raise ValueError("invalid IPv6 origin") from exc
+    else:
+        try:
+            host = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError("invalid hostname") from exc
+        labels = host[:-1].split(".") if host.endswith(".") else host.split(".")
+        if len(host) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("invalid hostname")
+    if port is not None and port not in ({80} if scheme == "http" else {443}):
+        host += f":{port}"
+    return f"{scheme}://{host}"
+
+
+def _canonical_public_origin(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return _canonical_origin(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "CB_PUBLIC_ORIGIN must be a valid HTTP(S) origin without path or credentials"
+        ) from exc
 
 
 class GrantRequest(BaseModel):
@@ -61,6 +114,7 @@ def _as_dict(model: BaseModel) -> dict:
 
 def create_app(cfg: Config) -> FastAPI:
     cfg.ensure_dirs()
+    public_origin = _canonical_public_origin(cfg.public_origin)
     store = Store(MasterKey(cfg.master_key_path), cfg.db_path)
     raw_hosts = json.loads(cfg.hosts_json)
     if not isinstance(raw_hosts, dict):
@@ -90,11 +144,14 @@ def create_app(cfg: Config) -> FastAPI:
             return JSONResponse({"detail": "旧版接口未启用"}, status_code=404)
         if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path != "/mcp":
             origin = request.headers.get("origin")
-            if origin:
-                parsed = urlsplit(origin)
-                valid = (parsed.scheme == request.url.scheme and parsed.netloc == request.url.netloc
-                         and not (parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment))
-                if not valid:
+            if origin is not None:
+                try:
+                    origin = _canonical_origin(origin)
+                    request_origin = _canonical_origin(f"{request.url.scheme}://{request.url.netloc}")
+                except ValueError:
+                    origin = ""
+                    request_origin = ""
+                if not origin or origin not in {request_origin, public_origin}:
                     return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
             if request.headers.get("sec-fetch-site") == "cross-site":
                 return JSONResponse({"detail": "请从管理界面发起请求"}, status_code=403)
@@ -169,7 +226,7 @@ def create_app(cfg: Config) -> FastAPI:
         resp = RedirectResponse("/admin", status_code=303)
         resp.set_cookie(
             cfg.session_cookie, cfg.admin_token, httponly=True, samesite="strict",
-            secure=request.url.scheme == "https", max_age=86400 * 7
+            secure=request.url.scheme == "https" or public_origin.startswith("https://"), max_age=86400 * 7
         )
         return resp
 
@@ -182,7 +239,10 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/logout")
     def logout(request: Request):
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(cfg.session_cookie)
+        response.delete_cookie(
+            cfg.session_cookie, httponly=True, secure=request.url.scheme == "https"
+            or public_origin.startswith("https://"), samesite="strict"
+        )
         return response
 
     @app.get("/admin/legacy", response_class=HTMLResponse)

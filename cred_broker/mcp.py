@@ -70,7 +70,7 @@ def register_mcp(app, control):
                 return _error(-32602, "Invalid protocol version", ident)
             result = {"protocolVersion": version if version in VERSIONS else VERSIONS[0],
                       "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "cred-broker", "version": "0.2.0"}}
+                      "serverInfo": {"name": "cred-broker", "version": "0.2.1"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

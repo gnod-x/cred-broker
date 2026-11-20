@@ -18,13 +18,58 @@ from cred_broker.store import MasterKey
 ADMIN = "test-admin-not-a-real-secret"
 
 
-def config(root):
+def config(root, public_origin=""):
     root = Path(root)
     return Config(root, root / "db", root / "key", "127.0.0.1:8765", root / "web.token",
-                  ADMIN, "", "{}", "cb_session", 10, 65536, None)
+                  ADMIN, "", "{}", "cb_session", 10, 65536, None, public_origin=public_origin)
 
 
 class ManagementTest(unittest.TestCase):
+    def test_configured_https_origin_is_exact_and_keeps_secure_cookie(self):
+        with tempfile.TemporaryDirectory() as root:
+            app = create_app(config(root, "https://broker.example"))
+            asyncio.run(self.public_origin_flow(app))
+
+    async def public_origin_flow(self, app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+            origin = "https://broker.example"
+            logged = await client.post("/login", headers={"Origin": origin}, data={"token": ADMIN})
+            self.assertEqual(logged.status_code, 303)
+            self.assertIn("Secure", logged.headers["set-cookie"])
+            authenticated = await client.get("/admin/api/v1/connections", headers={
+                "Origin": origin, "Cookie": "cb_session=" + ADMIN,
+            })
+            self.assertEqual(authenticated.status_code, 200)
+            managed = await client.post("/admin/api/v1/connections", headers={
+                "Origin": origin, "Cookie": "cb_session=" + ADMIN,
+            }, json={})
+            self.assertEqual(managed.status_code, 400)
+            cross = await client.post("/admin/api/v1/connections", headers={
+                "Origin": "https://attacker.example", "Cookie": "cb_session=" + ADMIN,
+            }, json={})
+            self.assertEqual(cross.status_code, 403)
+            malformed = await client.post("/logout", headers={"Origin": "http://[invalid"})
+            self.assertEqual(malformed.status_code, 403)
+            empty = await client.post("/logout", headers={"Origin": ""})
+            self.assertEqual(empty.status_code, 403)
+            logout = await client.post("/logout", headers={"Origin": origin})
+            self.assertEqual(logout.status_code, 303)
+            self.assertIn("Secure", logout.headers["set-cookie"])
+
+    def test_public_origin_rejects_path_and_credentials(self):
+        for origin in (
+            "https://broker.example/admin", "https://user@broker.example", "https://broker.example?",
+            "https://broker.example#", "https://broker.example:", "https://broker.example:0",
+        ):
+            with tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(RuntimeError, "CB_PUBLIC_ORIGIN"):
+                    create_app(config(root, origin))
+
+    def test_public_origin_normalizes_scheme_host_and_default_port(self):
+        with tempfile.TemporaryDirectory() as root:
+            app = create_app(config(root, "HTTPS://Broker.Example:443"))
+            asyncio.run(self.public_origin_flow(app))
+
     def test_full_flow_and_input_boundaries(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
             "CB_GOOGLE_CLIENT_ID": "", "CB_GOOGLE_CLIENT_SECRET": "", "CB_GOOGLE_REDIRECT_URI": "",

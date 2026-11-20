@@ -34,6 +34,7 @@ class Config:
     max_output_bytes: int
     ssh_known_hosts: Path | None
     legacy_enabled: bool = False
+    public_origin: str = ""
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -57,4 +58,5 @@ def load_config() -> Config:
         max_output_bytes=_env_int("CB_MAX_OUTPUT", 65536),
         ssh_known_hosts=Path(kh) if kh else None,
         legacy_enabled=os.environ.get("CB_ENABLE_LEGACY", "").lower() == "true",
+        public_origin=os.environ.get("CB_PUBLIC_ORIGIN", ""),
     )
