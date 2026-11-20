@@ -19,4 +19,6 @@
 
 脚本与复现命令见 README 和 `tests/`。浏览器和容器测试仅允许明确指定的隔离 fixture/staging；容器测试在任何重启前核验 Compose project，避免把生产实例当验收对象。
 
-真实 Google OAuth consent、GitHub App installation 与外部服务账号联调尚需部署者配置自己的账号；这些测试不能证明账号已经建立连接。systemd 部署脚本完成语法检查，当前运行验收采用 Docker Compose。GitHub Actions 工作流已写入仓库，云端手动验收通过不代表远端 Actions 已运行成功。发布状态以 GitHub 仓库、CI 与镜像实际存在为准。
+真实 Google OAuth consent、GitHub App installation 与外部服务账号联调尚需部署者配置自己的账号；这些测试不能证明账号已经建立连接。systemd 部署脚本完成语法检查，当前运行验收采用 Docker Compose。
+
+GitHub 发布验收也已完成：原始版本代码通过 [功能、浏览器与容器 CI](https://github.com/gnod-x/cred-broker/actions/runs/44755615571)，[镜像发布流水线](https://github.com/gnod-x/cred-broker/actions/runs/44756325668) 按 `v0.1.0` 标签重新验收并构建成功。`ghcr.io/gnod-x/cred-broker:0.1.0` 支持 Linux amd64，匿名 registry manifest 请求已返回 200，索引摘要为 `sha256:5d79dc280e4b03255e4fff2691223109317c138149be01b43afab17793f1f182`。

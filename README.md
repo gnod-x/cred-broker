@@ -4,6 +4,8 @@
 
 首版面向个人和小团队的单实例部署。管理台为简体中文，前端无需构建、无需 CDN；提供标准 MCP Streamable HTTP，使用 MIT 许可证。不包含模型账号或模型 API 授权。
 
+![连接目录与服务授权入口](docs/images/console.png)
+
 ## 已实现
 
 | 连接 | 身份方式 | 可授权工具 |
@@ -18,7 +20,7 @@
 
 ## 用 Docker Compose 部署
 
-需要 Docker Engine 和 Compose v2。首次构建需要访问 Docker Hub、PyPI 和 npm registry；运行时只访问所连接的上游服务。
+需要 Docker Engine 和 Compose v2，首版发布镜像支持 Linux amd64。默认拉取已验证的公开版本镜像；运行时只访问所连接的上游服务。
 
 ```bash
 git clone https://github.com/gnod-x/cred-broker.git
@@ -27,7 +29,7 @@ cp .env.example .env
 chmod 600 .env
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 # 把生成的随机值填入 .env 的 CB_ADMIN_TOKEN。
-docker compose up -d --build
+docker compose up -d --pull always --no-build
 docker compose ps
 ```
 
@@ -40,6 +42,8 @@ ssh -N -L 8765:127.0.0.1:8765 your-user@your-server
 需要域名时，在可信 HTTPS 反向代理后部署，同时让代理访问内部端口。只信任实际代理的转发头；不要无条件信任公网客户端传来的 `X-Forwarded-*`。管理员页面与 MCP 共用服务端口，使用不同认证。
 
 镜像以 UID/GID 10001 运行，根文件系统只读、不挂载宿主机 home、Docker socket 或 SSH agent，数据存在命名 volume `broker-data`。镜像附带校验 SHA-512 后安装的官方 Instabox CLI；不会导入宿主机现有 Instabox 登录。
+
+源码构建可使用 `docker compose up -d --build`，构建时需要访问 Docker Hub、PyPI 和 npm registry。ARM64 主机目前需要自行构建与验收，发布流水线暂只提供 amd64 镜像。
 
 Linux/systemd 部署可用 `sudo bash deploy.sh`，默认安装到 `/opt/cred-broker`。需要 Python 3.11+、venv、OpenSSH client 和 curl；脚本生成独立服务用户、首次管理令牌及服务单元。该脚本尚不替你配置域名或 HTTPS。
 
@@ -133,7 +137,7 @@ curl -sS http://localhost:8765/mcp \
 
 备份必须同时包含数据卷里的 `broker.db`、相关 WAL 状态和 `master.key`。最简单的方式是先 `docker compose stop`，再完整备份数据卷到加密存储，完成后 `docker compose start`。主密钥丢失后不能恢复凭证；数据库与主密钥一起泄露则可以解密，文件权限与主机隔离仍然必要。另行妥善保存 `.env`，不要提交到 Git。
 
-升级前备份，记录现用 Git tag 或镜像版本，拉取目标版本后重新构建并启动。回滚同时考虑代码与数据格式，不能假定降级总兼容。新表与原有 cred-broker 的凭证、授权和 token 表隔离，不自动迁移旧授权；开启兼容模式的范围与边界见 [架构说明](docs/architecture.md)。
+升级前备份，记录现用 Git tag 或镜像版本，更新 Compose 中的目标镜像版本后拉取并启动；源码部署则重新构建。回滚同时考虑代码与数据格式，不能假定降级总兼容。新表与原有 cred-broker 的凭证、授权和 token 表隔离，不自动迁移旧授权；开启兼容模式的范围与边界见 [架构说明](docs/architecture.md)。
 
 ## 开发与测试
 
