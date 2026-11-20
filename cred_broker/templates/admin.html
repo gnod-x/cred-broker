@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="/static/icons/ssh.svg" type="image/svg+xml">
+<title>授权中心 · cred-broker</title>
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/admin"><span aria-hidden="true">◇</span><div>授权中心<small>cred-broker</small></div></a>
+  <nav aria-label="管理导航">
+    <a href="#catalog">连接目录</a>
+    <a href="#connections">我的连接</a>
+    <a href="#grants">AI 授权</a>
+    <a href="#audit">操作记录</a>
+  </nav>
+  <footer>{% if legacy_enabled %}<a href="/admin/legacy">旧版管理台</a>{% endif %}<form method="post" action="/logout"><button type="submit" class="link">退出登录</button></form></footer>
+</aside>
+<main>
+  <header class="page-header"><div><h1 id="title" tabindex="-1">连接目录</h1><p id="intro">选择服务并创建连接。</p></div><button id="page-action" type="button" hidden></button></header>
+  <p id="notice" role="status" hidden></p>
+  <section id="content" aria-labelledby="title" aria-busy="true"><p>正在加载…</p></section>
+  <noscript>请启用 JavaScript 以使用管理台。</noscript>
+</main>
+<dialog id="dialog" aria-labelledby="dialog-title">
+  <div class="dialog-header"><h2 id="dialog-title"></h2><button id="close-dialog" type="button" class="quiet" aria-label="关闭窗口">×</button></div>
+  <p id="dialog-error" role="alert" hidden></p>
+  <div id="dialog-content"></div>
+</dialog>
+</body>
+</html>

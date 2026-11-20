@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cred-broker 管理</title>
+<style>
+  :root { --fg:#1c1c1e; --muted:#666; --line:#e3e3e6; --bg:#fbfbfc; --accent:#2b5cff; --bad:#b00020; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e8ea; --muted:#9a9aa0; --line:#33333a; --bg:#141416; --accent:#7d9bff; --bad:#ff8095; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 24px 16px 64px;
+         background: var(--bg); color: var(--fg); line-height: 1.55; }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 28px 0 10px; }
+  .sub { color: var(--muted); font-size: .875rem; margin: 0 0 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: .75rem; border: 1px solid var(--line); }
+  .ok { color: #1a7f37; border-color: #1a7f37; }
+  .bad { color: var(--bad); border-color: var(--bad); }
+  form.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 8px 0 4px; }
+  label { display: flex; flex-direction: column; font-size: .78rem; color: var(--muted); gap: 3px; }
+  input, select, textarea, button { font: inherit; font-size: .85rem; padding: 6px 8px; border: 1px solid var(--line);
+         border-radius: 6px; background: transparent; color: var(--fg); }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; }
+  button.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
+  .token-out { margin-top: 10px; padding: 10px; border: 1px dashed var(--accent); border-radius: 6px; word-break: break-all; }
+  .err { color: var(--bad); }
+  .scroll { overflow-x: auto; }
+  .empty { color: var(--muted); font-size: .85rem; padding: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>cred-broker</h1>
+  <p class="sub">AI 只能看到动作，看不到凭证。所有调用都会记入审计。</p>
+
+  <h2>1 · 凭证</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>名称</th><th>类型</th><th>元信息</th><th>更新</th><th></th></tr></thead>
+    <tbody id="cred-body"></tbody>
+  </table></div>
+  {% if not credentials %}<p class="empty">还没有凭证。</p>{% endif %}
+
+  <form class="row" id="cred-form">
+    <label>名称<input name="name" required placeholder="ssh:dong-server"></label>
+    <label>类型
+      <select name="kind">
+        <option value="ssh_password">ssh_password</option>
+        <option value="ssh_key">ssh_key</option>
+        <option value="api_key">api_key</option>
+        <option value="oauth_google">oauth_google</option>
+      </select>
+    </label>
+    <label style="flex:1 1 220px;">secret (JSON)<input name="secret" required placeholder='{"password":"..."}'></label>
+    <label style="flex:1 1 220px;">meta (JSON)<input name="meta" placeholder='{"base_url":"https://api.example.com","allowed_paths":["/v1/"]}'></label>
+    <button type="submit">保存凭证</button>
+  </form>
+  <p class="sub" style="margin-top:4px;">SSH 凭证名固定为 <code>ssh:&lt;host&gt;</code>，主机白名单见下方 hosts。</p>
+
+  <h2>2 · 授权（grant）</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>ID</th><th>agent</th><th>凭证</th><th>允许动作</th><th>TTL</th><th>有效 token</th><th>状态</th><th></th></tr></thead>
+    <tbody id="grant-body"></tbody>
+  </table></div>
+
+  <form class="row" id="grant-form">
+    <label>agent<input name="agent" value="claude-code"></label>
+    <label>凭证<input name="credential" required placeholder="ssh:dong-server 或 broker:ssh"></label>
+    <label>动作 (逗号分隔)<input name="actions" required placeholder="ssh.run"></label>
+    <label>TTL 秒<input name="ttl_seconds" type="number" value="3600" min="60"></label>
+    <label>备注<input name="note" placeholder=""></label>
+    <button type="submit">创建授权</button>
+  </form>
+
+  <h2>3 · 签发 token</h2>
+  <form class="row" id="token-form">
+    <label>名称<input name="name" value="claude-code" required></label>
+    <label>grant ID<input name="grant_id" required placeholder="g_xxxxxx"></label>
+    <button type="submit">签发</button>
+  </form>
+  <div id="token-out"></div>
+  <p class="sub">明文 token 只显示这一次。配置到 AI 侧后，不要写入任何会被 AI 读取的文件。</p>
+
+  <h2>4 · 主机白名单</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>host</th><th>地址</th><th>登录用户</th><th>允许命令</th></tr></thead>
+    <tbody id="host-body"></tbody>
+  </table></div>
+
+  <h2>5 · 审计</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>时间</th><th>agent</th><th>动作</th><th>目标</th><th>结果</th><th>详情</th></tr></thead>
+    <tbody id="audit-body"></tbody>
+  </table></div>
+</div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ts = s => s ? new Date(s * 1000).toLocaleString('zh-CN') : '';
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || data.error || res.status);
+  return data;
+}
+
+function render(snapshot) {
+  document.getElementById('cred-body').innerHTML = snapshot.credentials.map(c => `
+    <tr><td class="mono">${esc(c.name)}</td><td>${esc(c.kind)}</td>
+        <td class="mono">${esc(JSON.stringify(c.meta))}</td><td>${ts(c.updated_at)}</td>
+        <td><button class="danger" data-del-cred="${esc(c.name)}">删除</button></td></tr>`).join('')
+    || '<tr><td colspan="5" class="empty">没有凭证</td></tr>';
+
+  document.getElementById('grant-body').innerHTML = snapshot.grants.map(g => `
+    <tr><td class="mono">${esc(g.id)}</td><td>${esc(g.agent)}</td><td class="mono">${esc(g.credential)}</td>
+        <td class="mono">${esc(g.actions.join(', '))}</td><td>${g.ttl_seconds}s</td><td>${g.live_tokens}</td>
+        <td>${g.revoked_at ? '<span class="pill bad">已撤销</span>' : '<span class="pill ok">有效</span>'}</td>
+        <td>${g.revoked_at ? '' : `<button class="danger" data-revoke="${esc(g.id)}">撤销</button>`}</td></tr>`).join('')
+    || '<tr><td colspan="8" class="empty">没有授权</td></tr>';
+
+  document.getElementById('host-body').innerHTML = Object.entries(snapshot.hosts).map(([k, h]) => `
+    <tr><td class="mono">${esc(k)}</td><td class="mono">${esc(h.host)}</td><td>${esc(h.user)}</td>
+        <td class="mono">${esc(h.allowed_commands.join(' '))}</td></tr>`).join('');
+}
+
+async function loadAudit() {
+  const { audit } = await api('/admin/api/audit?limit=200');
+  document.getElementById('audit-body').innerHTML = audit.map(a => `
+    <tr><td>${ts(a.ts)}</td><td>${esc(a.actor)}</td><td class="mono">${esc(a.action)}</td>
+        <td class="mono">${esc(a.target)}</td>
+        <td><span class="pill ${a.outcome === 'allowed' ? 'ok' : 'bad'}">${esc(a.outcome)}</span></td>
+        <td class="mono">${esc(a.detail).slice(0, 300)}</td></tr>`).join('')
+    || '<tr><td colspan="6" class="empty">暂无记录</td></tr>';
+}
+
+async function refresh() { render(await api('/admin/api/overview')); await loadAudit(); }
+
+document.getElementById('cred-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    await api('/admin/api/credentials', { method: 'POST', body: JSON.stringify({
+      name: f.get('name'), kind: f.get('kind'),
+      secret: JSON.parse(f.get('secret') || '{}'),
+      meta: JSON.parse(f.get('meta') || '{}'),
+    })});
+    e.target.reset(); await refresh();
+  } catch (err) { alert('保存失败: ' + err.message); }
+});
+
+document.getElementById('grant-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    const r = await api('/admin/api/grants', { method: 'POST', body: JSON.stringify({
+      agent: f.get('agent'), credential: f.get('credential'),
+      actions: String(f.get('actions')).split(',').map(s => s.trim()).filter(Boolean),
+      ttl_seconds: Number(f.get('ttl_seconds')), note: f.get('note'),
+    })});
+    document.querySelector('#token-form [name=grant_id]').value = r.grant_id;
+    await refresh();
+  } catch (err) { alert('创建失败: ' + err.message); }
+});
+
+document.getElementById('token-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    const r = await api('/admin/api/tokens', { method: 'POST', body: JSON.stringify({
+      name: f.get('name'), grant_id: f.get('grant_id'),
+    })});
+    document.getElementById('token-out').innerHTML =
+      `<div class="token-out">token（只显示一次）<br><span class="mono">${esc(r.token)}</span><br>
+       过期：${ts(r.expires_at)}</div>`;
+    await loadAudit();
+  } catch (err) { alert('签发失败: ' + err.message); }
+});
+
+document.addEventListener('click', async e => {
+  const del = e.target.dataset.delCred, rev = e.target.dataset.revoke;
+  if (del && confirm(`删除凭证 ${del}？`)) { await api('/admin/api/credentials/' + encodeURIComponent(del), { method: 'DELETE' }); await refresh(); }
+  if (rev && confirm('撤销该授权？所有相关 token 立即失效。')) { await api(`/admin/api/grants/${rev}/revoke`, { method: 'POST' }); await refresh(); }
+});
+
+refresh();
+</script>
+</body>
+</html>

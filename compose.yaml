@@ -1,0 +1,28 @@
+services:
+  cred-broker:
+    build: .
+    image: cred-broker:0.1.0
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      CB_ADMIN_TOKEN: "${CB_ADMIN_TOKEN:?Set CB_ADMIN_TOKEN in .env}"
+      CB_GOOGLE_CLIENT_ID: "${CB_GOOGLE_CLIENT_ID:-}"
+      CB_GOOGLE_CLIENT_SECRET: "${CB_GOOGLE_CLIENT_SECRET:-}"
+      CB_GOOGLE_REDIRECT_URI: "${CB_GOOGLE_REDIRECT_URI:-}"
+    volumes:
+      - broker-data:/var/lib/cred-broker
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 96
+    stop_grace_period: 15s
+
+volumes:
+  broker-data:

@@ -1,0 +1,56 @@
+name: Test
+on:
+  push:
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose acceptance
+        run: |
+          umask 077
+          python3 -c 'import pathlib,secrets; pathlib.Path("/tmp/cred-broker-staging.env").write_text("CB_ADMIN_TOKEN="+secrets.token_urlsafe(32)+"\n")'
+          trap 'docker compose --env-file /tmp/cred-broker-staging.env -p cred-broker-staging down --volumes; rm -f /tmp/cred-broker-staging.env' EXIT
+          docker compose --env-file /tmp/cred-broker-staging.env -p cred-broker-staging up -d --build --wait
+          CB_TEST_STAGING=1 CB_TEST_ENV_FILE=/tmp/cred-broker-staging.env python3 -B tests/test_container.py
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install --no-cache-dir --upgrade pip==26.3 && pip install --no-cache-dir -r requirements-dev.txt
+      - run: |
+          python -IB tests/test_core.py
+          python -IB tests/test_control.py
+          python -IB tests/test_providers.py
+          python -IB tests/test_google.py
+          python -IB tests/test_app.py
+          python -IB tests/test_ssh_transport.py
+          python -IB tests/test_mcp_sdk.py
+      - run: python -m playwright install --with-deps chromium
+      - name: Browser acceptance with isolated fixtures
+        env:
+          CB_TEST_FIXTURE: '1'
+          CB_TEST_ADMIN_TOKEN: ci-fixture-only-not-a-real-key
+          CB_ADMIN_TOKEN: ci-fixture-only-not-a-real-key
+          CB_DATA_DIR: /tmp/cb-browser-fixture
+        run: |
+          python -m uvicorn tests.browser_fixture:app --host 127.0.0.1 --port 18765 > /tmp/cb-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid"; rm -rf /tmp/cb-browser-fixture /tmp/cb-fixture.log' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18765/healthz >/dev/null; then break; fi
+            sleep .5
+          done
+          python -B tests/test_browser.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-screenshots
+          path: test-results
