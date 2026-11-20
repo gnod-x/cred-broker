@@ -3,6 +3,10 @@ on:
   push:
   pull_request:
   workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
 permissions:
   contents: read
 jobs:
@@ -10,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: Compose acceptance
         run: |
           umask 077
@@ -21,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'

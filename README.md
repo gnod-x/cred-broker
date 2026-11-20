@@ -161,7 +161,7 @@ export CB_DATA_DIR=/tmp/cred-broker-browser-fixture
 .venv/bin/python -B tests/test_browser.py
 ```
 
-浏览器 fixture 只能用作测试。CI 会执行功能、官方 SDK 与浏览器测试；推送版本 tag 后的容器发布任务依赖这些检查通过，再向当前仓库对应的 GHCR 地址发布 amd64 镜像。
+浏览器 fixture 只能用作测试。CI 会执行功能、官方 SDK、浏览器与容器测试；推送版本 tag 后的容器发布任务依赖该版本的检查通过，再向当前仓库对应的 GHCR 地址发布 amd64 镜像。也可在 GitHub Actions 的 Container release 页面手动选择已有的 `vMAJOR.MINOR.PATCH` 标签补发；任务会核验实际检出的代码与该标签一致。
 
 凭证加密不能替代主机隔离，授权也不能自动消除 prompt injection。完整边界与限制见 [安全说明](docs/security.md)。
 
