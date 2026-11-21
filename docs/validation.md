@@ -30,9 +30,12 @@
 | 备份预检 | 通过 | 独立快照完整性、必需表/列、legacy/scoped 密钥配对及 JSON 结构；缺件/坏 key/坏密文/旁路文件拒绝；不写输入文件 |
 | Chromium 与响应式 | 通过 | 登录、诊断、四页导航、连接测试、MCP 配置、复制/关窗、重签发/撤销/删除、XSS；375/768/1024/1440px，无页面溢出或控制台错误 |
 | 独立 Compose | 通过 | UID10001、只读根、CapDrop、no-new-privileges、256MiB、回环端口；容器内 doctor、SQLite backup+配对检查、恢复解密、重启后 grant 可用、撤销和断开拒绝 |
-| GitHub CI、v0.3.0 tag 与 GHCR | 待发布后核验 | 发布流水线必须先通过检查，再发布 amd64 镜像；完成后补充运行链接和镜像摘要 |
+| GitHub CI、v0.3.0 tag 与 GHCR | 通过 | 标签指向 `c9568f2`；[主分支 CI](https://github.com/gnod-x/cred-broker/actions/runs/44850927046) 与[标签发布流水线](https://github.com/gnod-x/cred-broker/actions/runs/44869259039) 均成功，发布任务在功能、Chromium 和 Compose 检查后推送 amd64 镜像 |
+| 公开镜像拉取与运行 | 通过 | `three` 匿名拉取固定摘要，在独立 `cred-broker-test-published-v030` 项目和 `127.0.0.1:18767` 运行 `test_container.py`；加固、doctor、备份配对及恢复解密、重启持久性、撤销和断开均通过，认证 ready 返回 `0.3.0` |
 
 功能脚本：`test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`、`test_ssh_transport.py`、`test_mcp_sdk.py`、`test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`。浏览器与容器分别执行 `tests/test_browser.py`、`tests/test_container.py`。JavaScript `node --check` 与本地 Python 语法、`git diff --check` 通过。
+
+公开镜像为 `ghcr.io/gnod-x/cred-broker:0.3.0`，索引摘要 `sha256:6ddf144f7a2580806498f0e46985f83616e70be6ac6649d2758374613b104963`，Linux amd64 manifest 摘要 `sha256:22b6b90ca5cecfd021bb156c494e2659980d3936a38fb5520583c5315fce4570`。拉取后核对 OCI version 为 `0.3.0`、revision 为 `c9568f2f8c122c9944beaf4f26d2f5e471c02845`，没有用本地构建镜像代替公开制品。验收结果留在 `three:/data/workspace/cred-broker-v030-release-evidence/`；公开镜像验收的临时容器、数据卷和源码已删除。既有 staging 的容器 ID、镜像、启动时刻和健康状态未变，本机历史生产服务没有升级。
 
 这些结果覆盖合成 provider、真实回环协议、浏览器和本地构建容器，未验证用户的真实 Gmail/GitHub/SSH/Instabox 账号或特定第三方客户端兼容性。`ready` 不是上游可用性探针，`backup-check` 不是完整恢复；实际部署仍需自己的连接与恢复验收。
 

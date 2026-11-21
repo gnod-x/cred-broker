@@ -8,7 +8,7 @@
 
 ![v0.2.0 连接目录与服务授权入口](docs/images/console-v020.png)
 
-**v0.3.0 已完成云端隔离验收，正在核验发布。** 该版本加入运行诊断、连接最近测试状态、授权到期筛选与同范围重签发，并提供 MCP 接入配置、provider 能力描述、脱敏审计 CSV、本地 doctor、备份预检和短期管理会话。它也包含 v0.2.1 的 `CB_PUBLIC_ORIGIN` 反向代理来源校验修复。CI、镜像状态与验证边界见 [验收记录](docs/validation.md)。
+**v0.3.0 已发布公开镜像，并通过云端隔离验收。** 该版本加入运行诊断、连接最近测试状态、授权到期筛选与同范围重签发，并提供 MCP 接入配置、provider 能力描述、脱敏审计 CSV、本地 doctor、备份预检和短期管理会话。它也包含 v0.2.1 的 `CB_PUBLIC_ORIGIN` 反向代理来源校验修复。镜像摘要、升级步骤和测试范围见[版本说明](docs/releases/v0.3.0.md)和[验收记录](docs/validation.md)。
 
 ## 已实现
 
@@ -189,6 +189,7 @@ python3 -m venv .venv
 .venv/bin/python -IB tests/test_admin_auth.py
 .venv/bin/python -IB tests/test_doctor.py
 .venv/bin/python -IB tests/test_backup_check.py
+.venv/bin/python -IB tests/test_release_notes.py
 ```
 
 测试使用隔离数据库、假凭证与 mock upstream。SDK 测试启动临时回环 HTTP 服务器，通过官方 MCP Python 客户端完成握手、发现、调用和撤销验证。真实 Gmail、GitHub App 与 Instabox 账号授权需要部署者提供；mock 通过不代表那些账号已经连接。
@@ -204,6 +205,8 @@ export CB_DATA_DIR=/tmp/cred-broker-browser-fixture
 ```
 
 浏览器 fixture 只能用作测试。CI 会执行功能、官方 SDK、浏览器与容器测试；推送版本 tag 后的容器发布任务依赖该版本的检查通过，再向当前仓库对应的 GHCR 地址发布 amd64 镜像。也可在 GitHub Actions 的 Container release 页面手动选择已有的 `vMAJOR.MINOR.PATCH` 标签补发；任务会核验实际检出的代码与该标签一致。
+
+公开镜像验收后，把 `docs/releases/vMAJOR.MINOR.PATCH.md` 说明提交到 `main`。Release notes 流程核对版本标签和该标签触发的镜像流水线，确认成功后创建对应的 GitHub Release。正文相同的已有发布页会被直接复用。
 
 凭证加密不能替代主机隔离，授权也不能自动消除 prompt injection。完整边界与限制见 [安全说明](docs/security.md)。
 

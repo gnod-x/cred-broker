@@ -1,0 +1,33 @@
+name: Publish release notes
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/releases/v*.md']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-notes-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify publication guards
+        run: python -IB tests/test_release_notes.py
+      - name: Publish notes for an already validated version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: '1'
+        run: python -IB tools/publish_release_notes.py

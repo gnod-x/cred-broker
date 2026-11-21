@@ -44,6 +44,7 @@ jobs:
           python -IB tests/test_admin_auth.py
           python -IB tests/test_doctor.py
           python -IB tests/test_backup_check.py
+          python -IB tests/test_release_notes.py
       - run: python -m playwright install --with-deps chromium
       - name: Browser acceptance with isolated fixtures
         env:

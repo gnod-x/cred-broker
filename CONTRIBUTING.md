@@ -19,6 +19,7 @@ python3 -m venv .venv
 .venv/bin/python -IB tests/test_backup_check.py
 .venv/bin/python -IB tests/test_admin_auth.py
 .venv/bin/python -IB tests/test_doctor.py
+.venv/bin/python -IB tests/test_release_notes.py
 ```
 
 Use temporary databases, synthetic secrets and mock upstreams only. Never use or publish real credentials, account sessions, production databases, master keys, mailbox content or private repository data. Official SDK tests use a local fake provider: passing them establishes protocol behavior, not a real upstream integration.
@@ -43,3 +44,9 @@ Add tests for invalid settings and unknown fields, resource/tool denial, malform
 ## Pull requests
 
 Explain the user problem, resulting behavior, security implications and exact checks run. Link any updated setup instructions or schema changes. Mark checks that were not run and why; do not claim release or client compatibility before the corresponding verification succeeds.
+
+## Releases
+
+Push a `vMAJOR.MINOR.PATCH` tag only after isolated acceptance. The Container release workflow reruns that tag's tests before publishing the Linux amd64 image. Pull the public image anonymously by digest and verify it in a separate Compose project before documenting availability.
+
+Commit `docs/releases/vMAJOR.MINOR.PATCH.md` to `main` after image acceptance. The Publish release notes workflow verifies the source version and the successful image workflow triggered by the matching tag before it creates the GitHub Release. It reuses a release with identical notes and stops if the existing notes differ.
