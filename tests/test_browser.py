@@ -46,6 +46,14 @@ def run():
         page.get_by_role("button", name="登录", exact=True).click()
         expect(page.get_by_role("heading", name="连接目录", exact=True)).to_be_visible()
         expect(page.locator("#content")).to_have_attribute("aria-busy", "false")
+        page.get_by_role("button", name="运行诊断").click()
+        diagnostics = page.get_by_role("dialog")
+        expect(diagnostics).to_contain_text("版本")
+        expect(diagnostics).to_contain_text("存储")
+        expect(diagnostics).to_contain_text("主密钥")
+        expect(diagnostics).to_contain_text("迁移")
+        expect(diagnostics).to_contain_text("支持的服务")
+        diagnostics.get_by_role("button", name="关闭窗口").click()
         admin_response = context.request.get(BASE_URL + "/admin")
         assert "default-src" in admin_response.headers.get("content-security-policy", ""), "CSP missing"
         assert admin_response.headers.get("x-content-type-options") == "nosniff"
@@ -74,6 +82,40 @@ def run():
             page.locator(f"nav a[href='#{anchor}']").click()
             expect(page.get_by_role("heading", name=title, exact=True)).to_be_visible()
             expect(page.locator("#content")).to_have_attribute("aria-busy", "false")
+        page.locator("nav a[href='#audit']").click()
+        browser_dates = page.evaluate("""() => {
+          const now = new Date(); const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+          const local = d => [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
+          return {date: local(yesterday), after: Math.floor(yesterday.getTime()/1000), before: Math.floor(new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(),23,59,59).getTime()/1000)};
+        }""")
+        page.get_by_label("开始日期").fill(browser_dates["date"])
+        page.get_by_label("结束日期").fill(browser_dates["date"])
+        with page.expect_request(lambda request: "/admin/api/v1/audit/export.csv?" in request.url) as request_info, page.expect_download() as download_info:
+            page.get_by_role("button", name="导出 CSV").click()
+        request_url = request_info.value.url
+        assert f"after={browser_dates['after']}" in request_url and f"before={browser_dates['before']}" in request_url
+        download = download_info.value
+        assert download.suggested_filename == "cred-broker-audit.csv"
+        assert download.failure() is None
+        csv_bytes = download.path().read_bytes()
+        assert b"ts,client,action,connection_id,resource,outcome" in csv_bytes
+        for sensitive in (TOKEN, "ibk_fixture_read_not_a_real_key"):
+            assert sensitive.encode() not in csv_bytes
+        download.delete()
+        today = page.evaluate("""() => {
+          const d = new Date(); return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
+        }""")
+        page.get_by_label("开始日期").fill(today)
+        page.get_by_label("结束日期").fill(today)
+        with page.expect_response(lambda response: "/admin/api/v1/audit/export.csv?" in response.url) as response_info, page.expect_download() as download_info:
+            page.get_by_role("button", name="导出 CSV").click()
+        assert response_info.value.status == 200, "Today's export must not use a future before timestamp"
+        assert download_info.value.failure() is None
+        download_info.value.delete()
+        page.get_by_label("开始日期").fill("2020-01-01")
+        page.get_by_role("button", name="导出 CSV").click()
+        expect(page.locator("#audit-export-feedback")).to_contain_text("最多 31 天")
+        page.locator("nav a[href='#catalog']").click()
 
         card = page.get_by_role("article").filter(has=page.get_by_role("heading", name="Instabox", exact=True))
         card.get_by_role("button", name="连接", exact=True).click()
@@ -134,7 +176,7 @@ def run():
         gateway_token = popup.get_by_label("网关令牌", exact=True).input_value()
         assert gateway_token and gateway_token != TOKEN
         popup.get_by_role("button", name="复制令牌").click()
-        expect(popup.get_by_role("status")).to_have_text("已复制。")
+        expect(popup.get_by_role("status")).to_have_text("令牌已复制。")
         assert page.evaluate("navigator.clipboard.readText()") == gateway_token
         assert not page.evaluate("(token) => JSON.stringify({...localStorage,...sessionStorage}).includes(token)", gateway_token)
         popup.get_by_role("button", name="关闭窗口").click()
@@ -148,10 +190,30 @@ def run():
         grant_search.fill("missing-grant-fixture")
         expect(grant).to_have_count(0)
         grant_search.fill("")
+        expect(grant).to_contain_text("剩余")
+        grant.get_by_role("button", name="重签发").click()
+        reissue = page.get_by_role("dialog")
+        reissue.get_by_label("新的有效期").select_option("3600")
+        reissue.get_by_role("button", name="重签发并显示令牌").click()
+        expect(reissue.get_by_role("heading", name="网关令牌已签发")).to_be_visible()
+        next_token = reissue.get_by_label("网关令牌", exact=True).input_value()
+        assert next_token and next_token != gateway_token
+        assert gateway_token not in reissue.text_content()
+        reissue.get_by_role("button", name="关闭窗口").click()
+        assert gateway_token not in page.content()
+        grants_after_reissue = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert gateway_token not in str(grants_after_reissue)
+        assert any(item["client"] == client_label and item["revoked_at"] is not None for item in grants_after_reissue)
+        assert sum(item["client"] == client_label and item["revoked_at"] is None for item in grants_after_reissue) == 1
+        grant = page.get_by_role("article").filter(has=page.get_by_role("heading", name=client_label, exact=True)).filter(has=page.get_by_role("button", name="撤销授权", exact=True))
+        expect(grant).to_contain_text("剩余")
         grant.get_by_role("button", name="撤销授权").click()
         popup.get_by_role("button", name="确认", exact=True).click()
         expect(popup).not_to_be_visible()
-        expect(grant).to_contain_text("已撤销")
+        revoked_grants = page.get_by_role("article").filter(has=page.get_by_role("heading", name=client_label, exact=True))
+        expect(revoked_grants.filter(has_text="已撤销")).to_have_count(2)
+        final_grants = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert all(item["revoked_at"] is not None for item in final_grants if item["client"] == client_label)
         page.locator("nav a[href='#connections']").click()
         connected.get_by_role("button", name="删除连接").click()
         popup.get_by_role("button", name="确认", exact=True).click()
@@ -163,6 +225,8 @@ def run():
         expect(popup).not_to_be_visible()
         expect(malicious).to_have_count(0)
 
+        page.locator("nav a[href='#audit']").click()
+        expect(page.get_by_role("cell", name="重签发授权", exact=True)).to_be_visible()
         expect(page.locator("#notice")).to_be_hidden(timeout=7000)
         page.emulate_media(reduced_motion="reduce")
         for width in (375, 768, 1024, 1440):

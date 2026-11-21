@@ -8,13 +8,10 @@
 from __future__ import annotations
 
 import inspect
-import ipaddress
 import json
-import re
 import secrets
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -23,66 +20,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import ssh_exec
+from .admin_auth import AdminAuth, LOGIN_WINDOW, SESSION_TTL
 from .broker import Broker, Denied
 from .config import Config
 from .control import Control
 from .control_api import register_control_api
 from .google_oauth import GoogleSettings, register_google_oauth
 from .mcp import register_mcp
+from .origin import canonical_origin as _canonical_origin
+from .origin import canonical_public_origin as _canonical_public_origin
 from .store import MasterKey, Store
 
 HERE = Path(__file__).parent
-
-
-def _canonical_origin(value: str) -> str:
-    if not value or value != value.strip() or any(char.isspace() or ord(char) < 0x21 for char in value):
-        raise ValueError("invalid origin")
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-        hostname = parsed.hostname
-    except ValueError as exc:
-        raise ValueError("invalid origin") from exc
-    if (parsed.scheme.lower() not in {"http", "https"} or not hostname or not parsed.netloc
-            or "@" in parsed.netloc or parsed.username is not None or parsed.password is not None
-            or parsed.path or parsed.query or parsed.fragment or "?" in value or "#" in value
-            or parsed.netloc.endswith(":")):
-        raise ValueError("invalid origin")
-    if port is not None and port == 0:
-        raise ValueError("invalid origin port")
-    scheme = parsed.scheme.lower()
-    if ":" in hostname:
-        if "%" in hostname:
-            raise ValueError("invalid IPv6 origin")
-        try:
-            host = f"[{ipaddress.IPv6Address(hostname).compressed}]"
-        except ValueError as exc:
-            raise ValueError("invalid IPv6 origin") from exc
-    else:
-        try:
-            host = hostname.encode("idna").decode("ascii").lower()
-        except UnicodeError as exc:
-            raise ValueError("invalid hostname") from exc
-        labels = host[:-1].split(".") if host.endswith(".") else host.split(".")
-        if len(host) > 253 or any(
-            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-            for label in labels
-        ):
-            raise ValueError("invalid hostname")
-    if port is not None and port not in ({80} if scheme == "http" else {443}):
-        host += f":{port}"
-    return f"{scheme}://{host}"
-
-
-def _canonical_public_origin(value: str) -> str:
-    if not value:
-        return ""
-    try:
-        return _canonical_origin(value)
-    except ValueError as exc:
-        raise RuntimeError(
-            "CB_PUBLIC_ORIGIN must be a valid HTTP(S) origin without path or credentials"
-        ) from exc
 
 
 class GrantRequest(BaseModel):
@@ -181,8 +130,12 @@ def create_app(cfg: Config) -> FastAPI:
 
     # ---------- 鉴权 ----------
 
+    sessions = AdminAuth()
+
     def admin_ok(request: Request) -> bool:
-        tok = request.cookies.get(cfg.session_cookie) or request.headers.get("x-admin-token")
+        if sessions.valid(request.cookies.get(cfg.session_cookie)):
+            return True
+        tok = request.headers.get("x-admin-token", "")
         return bool(tok) and secrets.compare_digest(tok.encode(), cfg.admin_token.encode())
 
     def require_admin(request: Request) -> None:
@@ -190,8 +143,7 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(401, "需要管理员登录")
 
     def require_browser_admin(request: Request) -> None:
-        token = request.cookies.get(cfg.session_cookie, "")
-        if not secrets.compare_digest(token.encode(), cfg.admin_token.encode()):
+        if not sessions.valid(request.cookies.get(cfg.session_cookie)):
             raise HTTPException(401, "请先登录管理界面")
 
     control = Control(store)
@@ -219,14 +171,20 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/login")
     async def login(request: Request):
+        peer = request.client.host if request.client else "unknown"
+        if not sessions.admit_login(peer):
+            response = page(request, "login.html", {"error": "登录尝试过多，请一分钟后重试"}, status_code=429)
+            response.headers["Retry-After"] = str(LOGIN_WINDOW)
+            return response
         form = await request.form()
         token = str(form.get("token", ""))
         if not secrets.compare_digest(token.encode(), cfg.admin_token.encode()):
             return page(request, "login.html", {"error": "令牌不正确"}, status_code=401)
         resp = RedirectResponse("/admin", status_code=303)
         resp.set_cookie(
-            cfg.session_cookie, cfg.admin_token, httponly=True, samesite="strict",
-            secure=request.url.scheme == "https" or public_origin.startswith("https://"), max_age=86400 * 7
+            cfg.session_cookie, sessions.issue(request.cookies.get(cfg.session_cookie, "")),
+            httponly=True, samesite="strict",
+            secure=request.url.scheme == "https" or public_origin.startswith("https://"), max_age=SESSION_TTL
         )
         return resp
 
@@ -238,6 +196,7 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/logout")
     def logout(request: Request):
+        sessions.revoke(request.cookies.get(cfg.session_cookie, ""))
         response = RedirectResponse("/", status_code=303)
         response.delete_cookie(
             cfg.session_cookie, httponly=True, secure=request.url.scheme == "https"

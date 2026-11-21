@@ -6,9 +6,11 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
-PROJECT = "cred-broker-staging"
-CONTAINER = os.environ.get("CB_TEST_CONTAINER", "cred-broker-staging-cred-broker-1")
+PROJECT = os.environ.get("CB_TEST_PROJECT", "cred-broker-staging")
+CONTAINER = os.environ.get("CB_TEST_CONTAINER", PROJECT + "-cred-broker-1")
+BASE_URL = os.environ.get("CB_TEST_BASE_URL", "http://127.0.0.1:8765")
 FAKE_SECRET = "ibk_fixture_container_key"
 
 
@@ -42,6 +44,13 @@ def load_env(path):
 def main():
     if os.environ.get("CB_TEST_STAGING") != "1":
         raise SystemExit("Refusing: set CB_TEST_STAGING=1 for staging only")
+    if PROJECT != "cred-broker-staging" and not PROJECT.startswith("cred-broker-test-"):
+        raise SystemExit("Refusing: use a dedicated cred-broker-test-* Compose project")
+    endpoint = urlsplit(BASE_URL)
+    if (endpoint.scheme != "http" or endpoint.hostname != "127.0.0.1"
+            or not endpoint.port or endpoint.username or endpoint.password
+            or endpoint.path or endpoint.query or endpoint.fragment):
+        raise SystemExit("Refusing: test endpoint must be a loopback HTTP origin")
     env_path = os.environ.get("CB_TEST_ENV_FILE")
     if not env_path or not Path(env_path).is_file():
         raise SystemExit("Refusing: CB_TEST_ENV_FILE must reference external staging env")
@@ -61,9 +70,9 @@ def main():
     ports = host.get("PortBindings") or {}
     assert set(ports) == {"8765/tcp"}, "Unexpected published port"
     bindings = ports["8765/tcp"]
-    assert bindings and all(item["HostIp"] == "127.0.0.1" and item["HostPort"] == "8765"
-                            for item in bindings), "Publish only loopback 8765"
-    base = "http://127.0.0.1:8765"
+    assert bindings and all(item["HostIp"] == "127.0.0.1" and item["HostPort"] == str(endpoint.port)
+                            for item in bindings), "Publish only the expected loopback port"
+    base = BASE_URL
 
     def request(path, payload=None, bearer=None, admin_auth=False, method=None):
         headers = {}
@@ -99,6 +108,12 @@ def main():
 
     wait_healthy(time.monotonic() + 10)
     assert request("/admin/api/v1/connections")[0] == 401
+    assert request("/admin/api/v1/ready")[0] == 401
+    code, status = request("/admin/api/v1/ready", admin_auth=True)
+    assert code == 200 and status["storage"] == "ready" and status["migrations"] == "current"
+    code, schema = request("/admin/api/v1/providers/instabox/schema", admin_auth=True)
+    assert code == 200 and schema["schema"]["secret"]["properties"]["read_key"]["writeOnly"]
+    docker("exec", CONTAINER, "python", "-B", "-m", "cred_broker", "doctor", timeout=10)
     assert rpc("fixture-invalid", "tools/list")[0] == 401
     connection_id = grant_id = None
     try:
@@ -124,6 +139,7 @@ import os, shutil, sqlite3, tempfile
 from pathlib import Path
 from cred_broker.store import Store, MasterKey
 from cred_broker.control import Control
+from cred_broker.backup_check import run as check_backup
 root = Path(os.environ.get('CB_DATA_DIR','/var/lib/cred-broker'))
 db = Path(os.environ.get('CB_DB_PATH',str(root/'broker.db')))
 key = Path(os.environ.get('CB_MASTER_KEY_PATH',str(root/'master.key')))
@@ -145,6 +161,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as temp:
     copied_key = Path(temp)/'master.key'
     shutil.copyfile(key,copied_key)
     copied_key.chmod(0o400)
+    assert check_backup(['--db',str(backup),'--key',str(copied_key)]) == 0
     restored = Control(Store(MasterKey(copied_key),backup))
     assert any(row['label']=='Container test fixture' for row in restored.connections())
 print('storage checks passed')

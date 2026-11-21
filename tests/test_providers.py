@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +14,96 @@ from cred_broker import providers
 
 
 class ProviderTests(unittest.TestCase):
+    def test_connection_schema_matches_validator_and_contains_no_values(self):
+        for provider, (required, optional, secret_required, secret_optional) in providers.FIELDS.items():
+            schema = providers.connection_schema(provider)
+            self.assertIn("auth_mode", schema)
+            settings = schema["settings"]
+            self.assertEqual(set(settings["properties"]), set(required) | set(optional))
+            self.assertEqual(set(settings["required"]), set(required))
+            self.assertFalse(settings["additionalProperties"])
+            secret = schema["secret"]
+            expected_secret = set() if provider == "gmail" else set(secret_required) | set(secret_optional)
+            self.assertEqual(set(secret["properties"]), expected_secret)
+            self.assertEqual(set(secret["required"]), set() if provider == "gmail" else set(secret_required))
+            self.assertFalse(secret["additionalProperties"])
+            for name, field in secret["properties"].items():
+                self.assertTrue(field["writeOnly"], name)
+            serialized = json.dumps(schema)
+            for value in ("fake-secret", "ibk_fake123", "private material", "refresh_token"):
+                self.assertNotIn(value, serialized)
+            self.assertTrue(schema["resource_constraints"]["source"])
+            self.assertNotEqual(schema["resource_constraints"]["items"].get("pattern"), "configured-host-and-port")
+            self.assertTrue(schema["tools"])
+            for tool in schema["tools"]:
+                self.assertFalse(tool["inputSchema"]["additionalProperties"])
+                self.assertIn("resource", tool["inputSchema"]["required"])
+
+    def test_schema_text_boundaries_and_validator_normalization(self):
+        ssh = providers.connection_schema("ssh")
+        settings = {"host": "a" * 256, "port": "65535", "user": "reader",
+                    "host_key": "ssh-ed25519 ZmFrZQ==", "services": ["one.service", "one.service"]}
+        normalized, _ = providers.validate_connection("ssh", settings, {"private_key": "fixture"})
+        resource = providers.resource_list("ssh", normalized)[0]["id"]
+        self.assertEqual(len(resource), 262)
+        self.assertGreaterEqual(ssh["resource_constraints"]["items"]["maxLength"], len(resource))
+        self.assertNotIn("uniqueItems", ssh["settings"]["properties"]["services"])
+        self.assertEqual(normalized["services"], ["one.service"])
+        email = providers.connection_schema("gmail")["settings"]["properties"]["email"]
+        self.assertIsNotNone(re.search(email["not"]["pattern"], "a\x00@b"))
+        with self.assertRaises(ValueError):
+            providers.validate_connection("gmail", {"email": "a\x00@b"},
+                                          {"client_id": "fixture", "client_secret": "fixture", "refresh_token": "fixture"})
+        host = ssh["settings"]["properties"]["host"]
+        self.assertEqual(host["maxLength"], 256)
+        for bad in ("!valid.example", "valid.example!", "valid.example\n"):
+            self.assertIsNone(re.search(host["pattern"], bad))
+            with self.assertRaises(ValueError):
+                providers.validate_connection("ssh", {**settings, "host": bad}, {"private_key": "fixture"})
+        numeric_string = ssh["settings"]["properties"]["port"]["oneOf"][1]
+        self.assertEqual(numeric_string["serverValidation"]["numericMaximum"], 65535)
+        with self.assertRaises(ValueError):
+            providers.validate_connection("ssh", {**settings, "port": "65536"}, {"private_key": "fixture"})
+
+    def test_schema_secret_and_conditional_tool_boundaries(self):
+        schema = providers.connection_schema("instabox")
+        field = schema["secret"]["properties"]["read_key"]
+        for key in ("ibk_" + "a" * 252, "ibk_" + "a" * 253, "ibk_valid\n", "xibk_valid"):
+            accepted = len(key) <= field["maxLength"] and re.search(field["pattern"], key) is not None
+            try:
+                providers.validate_connection("instabox", {"machines": ["one"]}, {"read_key": key})
+                valid = True
+            except ValueError:
+                valid = False
+            self.assertEqual(accepted, valid, repr(key))
+        diagnostic = next(tool for tool in schema["tools"] if tool["name"] == "instabox_diagnostics")
+        self.assertEqual(diagnostic["requires_secret"], ["diagnostic_key"])
+        self.assertNotIn("instabox_diagnostics", [tool["name"] for tool in providers.tool_specs("instabox", {"machines": ["one"]})])
+        private = providers.connection_schema("ssh")["secret"]["properties"]["private_key"]
+        self.assertIsNotNone(re.search(private["pattern"], "line one\nline two"))
+        self.assertIsNone(re.search(private["pattern"], "line\x00two"))
+        self.assertEqual(private["minLength"], 1)
+        self.assertEqual(private["maxLength"], 32768)
+
+    def test_tool_schema_reports_runtime_string_constraints_and_is_independent(self):
+        gmail = providers.connection_schema("gmail")
+        read = next(tool for tool in gmail["tools"] if tool["name"] == "gmail_read")
+        message = read["inputSchema"]["properties"]["message_id"]
+        for bad in ("id!", "id\n", "a" * 129):
+            self.assertIsNone(re.search(message["pattern"], bad))
+        query = gmail["tools"][0]["inputSchema"]["properties"]["query"]
+        self.assertEqual(query["minLength"], 1)
+        self.assertEqual(query["maxLength"], 256)
+        query["maxLength"] = 1
+        self.assertEqual(providers.connection_schema("gmail")["tools"][0]["inputSchema"]["properties"]["query"]["maxLength"], 256)
+        self.assertEqual(providers.TOOLS["gmail"]["search"][1]["query"]["maxLength"], 256)
+
+    def test_connection_schema_rejects_future_provider(self):
+        with self.assertRaises(ValueError):
+            providers.connection_schema("feishu")
+        with self.assertRaises(ValueError):
+            providers.connection_schema("unknown")
+
     def test_gmail_schema_and_argument_bounds_match_execution(self):
         settings = {"email": "reader@example.test"}
         secret = {"client_id": "fake-client", "client_secret": "fake-secret", "refresh_token": "fake-refresh"}

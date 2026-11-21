@@ -1,11 +1,11 @@
 services:
   cred-broker:
     build: .
-    image: ghcr.io/gnod-x/cred-broker:0.2.1
+    image: ghcr.io/gnod-x/cred-broker:0.3.0
     init: true
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8765:8765"
+      - "127.0.0.1:${CB_HOST_PORT:-8765}:8765"
     environment:
       CB_ADMIN_TOKEN: "${CB_ADMIN_TOKEN:?Set CB_ADMIN_TOKEN in .env}"
       CB_GOOGLE_CLIENT_ID: "${CB_GOOGLE_CLIENT_ID:-}"

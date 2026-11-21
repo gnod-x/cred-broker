@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, Request, Response
 
 from fastapi.responses import JSONResponse
+from . import __version__
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 
@@ -70,7 +71,7 @@ def register_mcp(app, control):
                 return _error(-32602, "Invalid protocol version", ident)
             result = {"protocolVersion": version if version in VERSIONS else VERSIONS[0],
                       "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "cred-broker", "version": "0.2.1"}}
+                      "serverInfo": {"name": "cred-broker", "version": __version__}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

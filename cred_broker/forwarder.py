@@ -16,6 +16,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from . import __version__
+
 
 class ForwardError(RuntimeError):
     pass
@@ -60,7 +62,7 @@ def _build_request(service: dict, meta: dict, secret: dict, method: str, path: s
         raise ForwardError("服务缺少 base_url")
     url = base + path
 
-    headers = {"User-Agent": "cred-broker/0.2.1", **extra_headers}
+    headers = {"User-Agent": f"cred-broker/{__version__}", **extra_headers}
     inject = meta.get("inject") or {}
 
     kind = inject.get("type", "header")

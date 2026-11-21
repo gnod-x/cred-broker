@@ -9,9 +9,32 @@
 | 管理 API | 通过 | 代理 Origin 登录、管理 POST 来源、恶意来源与畸形来源拒绝、Secure 登录/注销 Cookie、非法配置拒绝 |
 | 核心与 provider 回归 | 通过 | `test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py` |
 | 官方 MCP SDK | 通过 | `test_mcp_sdk.py` 回环协议验证 |
-| GitHub CI、GHCR 镜像与 three staging | 待完成 | 发布后更新此记录 |
+| GitHub CI / 镜像流水线 | 通过 | [测试](https://github.com/gnod-x/cred-broker/actions/runs/44789721802)、[v0.2.1 镜像构建](https://github.com/gnod-x/cred-broker/actions/runs/44789721808)；本轮未改既有 staging |
 
-`CB_PUBLIC_ORIGIN` 必须是无路径的 HTTP(S) origin，例如 `https://broker.example.com`。通过 HTTPS 反向代理部署时，在 Compose 环境文件设置该值。GitHub CI、镜像与 three staging 的最终结果将在发布后补录。
+`CB_PUBLIC_ORIGIN` 必须是无路径的 HTTP(S) origin，例如 `https://broker.example.com`。通过 HTTPS 反向代理部署时，在 Compose 环境文件设置该值。历史流水线状态已按公开运行记录核对；v0.3.0 使用下面的独立环境验收。
+
+## v0.3.0 · 接入与运维验收
+
+日期：2026-11-21。环境为 Instabox `three` 上的隔离源码副本、合成凭证、临时数据库和独立 Compose project `cred-broker-test-v030`；容器只映射 `127.0.0.1:18766`，浏览器 fixture 只监听 `127.0.0.1:18765`。未修改既有 `cred-broker-staging`，未读取或复制本机生产数据与登录。
+
+| 验证 | 结果 | 范围 |
+|---|---|---|
+| Python 回归 | 通过 | 10 个脚本；44 个 unittest 场景及旧核心 27 个断言；覆盖控制层、provider、OAuth、管理 API、SSH、官方 MCP SDK、管理认证和本地预检 |
+| 管理 ready | 通过 | 未认证 401；版本/存储/已加载 key/schema 状态；不返回路径与秘密；缺表 schema 标记 incomplete |
+| 连接最近测试 | 通过 | 初始未测试、成功/失败时间与状态；provider 回应正文和凭证不进入状态存储 |
+| 授权重签发 | 通过 | 同范围原子替换、旧 token 拒绝、新 token 一次返回、过期可重签、撤销拒绝、并发仅一个替代、失败事务回滚 |
+| Provider schema | 通过 | 四个支持 provider 的字段与约束，未知/计划 provider 拒绝；密钥 writeOnly，动态范围由服务端实施 |
+| 审计 CSV | 通过 | 管理员认证、日期与 31 天上限、固定六列、公式防护；Chromium 下载、今天的结束时间、超大日期窗口提示和假凭证排除 |
+| 管理会话 | 通过 | cookie 使用独立随机值、哈希存储、轮换/注销/到期/重启失效，最多 128 会话；每来源与实例登录速率窗口 |
+| 本地 doctor | 通过 | 新安装不创建目录；坏权限/密钥长度/SQLite/缺 key/配置错误；关闭的 WAL 库不产生辅助文件，运行中的 WAL 明确跳过完整性检查 |
+| 备份预检 | 通过 | 独立快照完整性、必需表/列、legacy/scoped 密钥配对及 JSON 结构；缺件/坏 key/坏密文/旁路文件拒绝；不写输入文件 |
+| Chromium 与响应式 | 通过 | 登录、诊断、四页导航、连接测试、MCP 配置、复制/关窗、重签发/撤销/删除、XSS；375/768/1024/1440px，无页面溢出或控制台错误 |
+| 独立 Compose | 通过 | UID10001、只读根、CapDrop、no-new-privileges、256MiB、回环端口；容器内 doctor、SQLite backup+配对检查、恢复解密、重启后 grant 可用、撤销和断开拒绝 |
+| GitHub CI、v0.3.0 tag 与 GHCR | 待发布后核验 | 发布流水线必须先通过检查，再发布 amd64 镜像；完成后补充运行链接和镜像摘要 |
+
+功能脚本：`test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`、`test_ssh_transport.py`、`test_mcp_sdk.py`、`test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`。浏览器与容器分别执行 `tests/test_browser.py`、`tests/test_container.py`。JavaScript `node --check` 与本地 Python 语法、`git diff --check` 通过。
+
+这些结果覆盖合成 provider、真实回环协议、浏览器和本地构建容器，未验证用户的真实 Gmail/GitHub/SSH/Instabox 账号或特定第三方客户端兼容性。`ready` 不是上游可用性探针，`backup-check` 不是完整恢复；实际部署仍需自己的连接与恢复验收。
 
 ## v0.2.0 · 界面重构验收
 

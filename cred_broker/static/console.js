@@ -123,20 +123,41 @@ function showDialog(title) {
   if (!dialog.open) dialog.showModal();
 }
 
+async function showDiagnostics() {
+  showDialog("运行诊断");
+  const generation = dialogGeneration;
+  dialogContent.append(node("p", "正在检查运行状态…", "loading-state"));
+  try {
+    const ready = await api("/ready", "GET");
+    if (generation !== dialogGeneration || !dialog.open) return;
+    dialogContent.replaceChildren();
+    const table = node("dl", undefined, "diagnostic-list");
+    for (const [label, key] of [["版本", "version"], ["存储", "storage"], ["主密钥", "key"], ["迁移", "migrations"]]) {
+      table.append(node("dt", label), node("dd", ready[key] ?? "未知"));
+    }
+    table.append(node("dt", "支持的服务"), node("dd", Array.isArray(ready.providers) ? ready.providers.join("、") || "暂无" : "未知"));
+    dialogContent.append(table);
+  } catch (error) {
+    if (generation !== dialogGeneration || !dialog.open) return;
+    dialogContent.replaceChildren(node("p", error instanceof Error ? error.message : "诊断失败，请重试。", "empty-state"));
+  }
+}
+
 function closeDialog() {
   dialogGeneration++; dialogContent.replaceChildren(); dialog.close();
 }
 
-dialog.addEventListener("cancel", () => {dialogGeneration++; dialogContent.replaceChildren();});
+dialog.addEventListener("cancel", (event) => { if (dialog.dataset.preventCancel === "true") { event.preventDefault(); return; } dialogGeneration++; dialogContent.replaceChildren(); });
 byId("close-dialog").addEventListener("click", closeDialog);
+byId("diagnostics")?.addEventListener("click", showDiagnostics);
 dialog.addEventListener("close", () => { dialogGeneration++; dialogContent.replaceChildren(); });
 
-function submitForm(form, text, action) {
+function submitForm(form, text, action, options = {}) {
   let submitting = false;
   const submit = node("button", text);
   submit.type = "submit";
   const actions = node("div", undefined, "dialog-actions");
-  actions.append(button("取消", closeDialog, "quiet"), submit); form.append(actions);
+  const cancel = button("取消", closeDialog, "quiet"); actions.append(cancel, submit); form.append(actions);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (submitting) return;
@@ -144,10 +165,11 @@ function submitForm(form, text, action) {
     const generation = dialogGeneration;
     submit.disabled = true;
     submit.textContent = "正在处理…";
+    if (options.preventClose) { dialog.dataset.preventCancel = "true"; cancel.disabled = true; byId("close-dialog").disabled = true; }
     dialogError.hidden = true;
     try { await action(new FormData(form), () => generation === dialogGeneration && dialog.open); }
     catch (error) { if (generation === dialogGeneration) fail(error); }
-    finally { submitting = false; submit.disabled = false; submit.textContent = text; }
+    finally { submitting = false; submit.disabled = false; submit.textContent = text; if (options.preventClose) { delete dialog.dataset.preventCancel; cancel.disabled = false; byId("close-dialog").disabled = false; } }
   });
 }
 
@@ -348,9 +370,13 @@ function renderConnections(connections) {
     const item = node("article", undefined, "card connection-row");
     const main = node("div", undefined, "connection-main"); main.append(node("h2", connection.label));
     const meta = node("div", undefined, "connection-meta"); meta.append(node("span", name), node("span", "创建于 " + date(connection.created_at)));
-    const state = health.get(connection.id);
-    const status = node("span", state ? state.ok ? "测试通过" : "测试失败" : "已连接（配置）", "status-badge " + (state ? state.ok ? "status-healthy" : "status-error" : "status-configured"));
-    main.append(meta, tags(connection.resources.map(entry => entry.label), "connection-resources"));
+    const localHealth = health.get(connection.id);
+    const checkedAt = localHealth?.checkedAt != null ? Math.floor(localHealth.checkedAt / 1000) : connection.health?.checked_at;
+    const ok = localHealth?.ok ?? connection.health?.ok;
+    const statusText = checkedAt != null ? (ok ? "测试通过" : "测试失败") : "已连接（未测试）";
+    const status = node("span", statusText, "status-badge " + (checkedAt != null ? (ok ? "status-healthy" : "status-error") : "status-configured"));
+    const tested = checkedAt != null ? node("span", "最近测试 " + date(checkedAt), "health-time") : node("span", "尚未测试", "health-time");
+    main.append(meta, tested, tags(connection.resources.map(entry => entry.label), "connection-resources"));
     const actions = node("div", undefined, "actions connection-actions");
     actions.append(button("测试连接", () => testConnection(connection), "quiet"),
       button("删除连接", () => confirmAction("删除连接", "确定删除「" + connection.label + "」？关联授权将无法再接纳新的调用，已接纳的操作可能继续完成。", () => api("/connections/" + encodeURIComponent(connection.id), "DELETE"), "连接已删除。"), "danger"));
@@ -364,28 +390,27 @@ function renderConnections(connections) {
 
 function showToken(token) {
   showDialog("网关令牌已签发");
-  dialogContent.append(node("p", "令牌仅在此窗口显示一次。请复制并保管，关闭后无法再次查看。"));
+  dialogContent.append(node("p", "令牌仅在此窗口显示一次。请复制并保管，关闭后无法再次查看。配置文件中的令牌可能以明文保存，请优先使用客户端的安全 secret 字段。"));
   const label = node("label", "网关令牌");
-  const input = node("input", undefined, "secret-value token-input");
-  input.readOnly = true;
-  input.autocomplete = "off";
-  input.spellcheck = false;
-  input.value = token;
-  label.append(input);
-  const status = node("p");
-  status.setAttribute("role", "status");
-  dialogContent.append(label, button("复制令牌", async () => {
-    try {
-      await navigator.clipboard.writeText(input.value);
-      status.textContent = "已复制。";
-    } catch {
-      input.select();
-      status.textContent = "无法访问剪贴板，请手动复制选中的令牌。";
-    }
-  }), status);
+  const input = node("textarea", undefined, "secret-value token-input");
+  input.readOnly = true; input.autocomplete = "off"; input.spellcheck = false; input.value = token; label.append(input);
+  input.rows = 2;
+  const status = node("p"); status.setAttribute("role", "status");
+  const copy = async (value, feedback = "已复制。", fallback) => { try { await navigator.clipboard.writeText(value); status.textContent = feedback; } catch { fallback?.focus(); fallback?.select(); status.textContent = "无法访问剪贴板，内容已选中，请手动复制。"; } };
+  dialogContent.append(label, button("复制令牌", () => copy(input.value, "令牌已复制。", input)), status);
   const instructions = node("div", undefined, "mcp-instructions");
-  instructions.append(node("h3", "连接到 AI 客户端"), node("p", "将以下地址设为 Streamable HTTP MCP 服务，认证方式选择 Bearer，并使用上方网关令牌。"));
-  const gateway = node("code", location.origin + "/mcp"); instructions.append(gateway);
+  instructions.append(node("h3", "连接到 AI 客户端"), node("p", "以下示例使用通用 Streamable HTTP MCP。客户端需支持 HTTP transport 和自定义 Bearer header；请把令牌放入客户端安全 secret 字段或临时环境变量。"));
+  const gateway = location.origin + "/mcp";
+  function snippet(title, value, feedback) {
+    const block = node("div", undefined, "config-snippet"); const heading = node("div", undefined, "config-snippet-head");
+    const area = node("textarea", value, "config-snippet-value"); area.readOnly = true; area.rows = Math.min(8, value.split("\n").length);
+    heading.append(node("strong", title), button("复制", () => copy(value, feedback, area), "quiet")); block.append(heading, area); return block;
+  }
+  instructions.append(
+    snippet("通用 HTTP", "URL: " + gateway + "\nAuthorization: Bearer $CRED_BROKER_TOKEN", "通用 HTTP 配置已复制。"),
+    snippet("通用客户端 JSON（需支持变量插值）", JSON.stringify({mcpServers: {"cred-broker": {type: "http", url: gateway, headers: {Authorization: "Bearer ${CRED_BROKER_TOKEN}"}}}}, null, 2), "JSON 配置已复制。"),
+    snippet("curl smoke test", "read -rs -p '网关令牌: ' CRED_BROKER_TOKEN; export CRED_BROKER_TOKEN; echo\ncurl -sS " + gateway + " \\\n  -H \"Authorization: Bearer $CRED_BROKER_TOKEN\" \\\n  -H 'Accept: application/json, text/event-stream' \\\n  -H 'Content-Type: application/json' \\\n  --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"1\"}}}'\ncurl -sS " + gateway + " \\\n  -H \"Authorization: Bearer $CRED_BROKER_TOKEN\" \\\n  -H 'Accept: application/json, text/event-stream' \\\n  -H 'Content-Type: application/json' \\\n  --data '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}'", "curl 示例已复制。"),
+  );
   dialogContent.append(instructions); input.focus();
 }
 
@@ -462,7 +487,31 @@ function date(seconds) {
 }
 
 function grantState(grant) {
-  return grant.revoked_at != null ? "已撤销" : grant.expires_at <= Date.now() / 1000 ? "已过期" : "有效";
+  if (grant.revoked_at != null) return "已撤销";
+  const seconds = grant.expires_at - Date.now() / 1000;
+  return seconds <= 0 ? "已过期" : seconds <= 3600 ? "即将过期" : "有效";
+}
+
+function remaining(seconds) {
+  const total = Math.max(0, Math.round(seconds - Date.now() / 1000));
+  if (!total) return "已到期";
+  if (total < 3600) return "剩余 " + Math.max(1, Math.ceil(total / 60)) + " 分钟";
+  if (total < 86400) return "剩余 " + Math.ceil(total / 3600) + " 小时";
+  return "剩余 " + Math.ceil(total / 86400) + " 天";
+}
+
+function renewGrant(grant) {
+  showDialog("重签发授权");
+  const form = node("form"); form.append(node("p", "旧令牌会立即拒绝新的调用，已接纳的操作可能继续完成。新令牌只显示一次。", "form-context"));
+  const ttl = node("select"); ttl.setAttribute("aria-label", "新的有效期"); ttl.name = "ttl";
+  for (const [seconds, text] of [[900, "15 分钟"], [3600, "1 小时"], [28800, "8 小时"], [86400, "24 小时"]]) { const option = node("option", text); option.value = seconds; ttl.append(option); }
+  const label = node("label", "新的有效期"); label.append(ttl); form.append(label);
+  submitForm(form, "重签发并显示令牌", async (data, isCurrent) => {
+    const result = await api("/grants/" + encodeURIComponent(grant.id) + "/reissue", "POST", {ttl_seconds: Number(data.get("ttl"))});
+    if (isCurrent()) showToken(result.token); else notice("授权已重签发，但令牌窗口已取消。请重新重签发。");
+    void render();
+  }, {preventClose: true});
+  dialogContent.append(form);
 }
 
 function renderGrants(grants, connections) {
@@ -471,30 +520,39 @@ function renderGrants(grants, connections) {
   const controls = node("div", undefined, "catalog-toolbar"); const list = node("div", undefined, "grant-list");
   const draw = () => {
     list.replaceChildren();
-    const selected = grants.filter(grant => (filters.grants === "全部" || grantState(grant) === filters.grants) && [grant.client, connections.find(connection => String(connection.id) === String(grant.connection_id))?.label, ...grant.resources, ...grant.tools].join(" ").toLowerCase().includes(filters.grantQuery.toLowerCase().trim()));
+    const selected = grants.filter(grant => {
+      const state = grantState(grant);
+      return (filters.grants === "全部" || state === filters.grants) && [grant.client, connections.find(connection => String(connection.id) === String(grant.connection_id))?.label, ...grant.resources, ...grant.tools].join(" ").toLowerCase().includes(filters.grantQuery.toLowerCase().trim());
+    });
     for (const grant of selected) {
       const connection = connections.find(item => String(item.id) === String(grant.connection_id));
       const state = grantState(grant); const item = node("article", undefined, "card grant-card");
       const head = node("div", undefined, "grant-head"); const identity = node("div");
       identity.append(node("h2", grant.client), node("p", connection?.label || "连接已删除", "grant-meta"));
-      const statusClass = state === "有效" ? "status-healthy" : state === "已过期" ? "status-expired" : "status-revoked";
+      const statusClass = state === "有效" ? "status-healthy" : state === "已撤销" ? "status-revoked" : "status-expired";
       head.append(identity, node("span", state, "status-badge " + statusClass));
       const scope = node("div", undefined, "grant-scope"); scope.append(node("span", "资源", "scope-label"), tags(grant.resources.map(id => connection?.resources.find(resource => resource.id === id)?.label || id)), node("span", "工具", "scope-label"), tags(grant.tools));
-      const meta = node("p", "签发于 " + date(grant.created_at) + " · 到期时间：" + date(grant.expires_at), "grant-meta");
+      const active = state === "有效" || state === "即将过期";
+      const meta = node("p", "签发于 " + date(grant.created_at) + " · 到期时间：" + date(grant.expires_at) + " · " + (active ? remaining(grant.expires_at) : state), "grant-meta");
       item.append(head, scope, meta);
-      if (state === "有效") {
+      if (state !== "已撤销") {
         const actions = node("div", undefined, "actions");
-        actions.append(button("撤销授权", () => confirmAction("撤销授权", "撤销后该令牌将立即拒绝新的调用；已接纳的操作可能继续完成。", () => api("/grants/" + encodeURIComponent(grant.id) + "/revoke", "POST"), "授权已撤销。"), "danger"));
+        actions.append(button("重签发", () => renewGrant(grant), "quiet"));
+        if (active) actions.append(button("撤销授权", () => confirmAction("撤销授权", "撤销后该令牌将立即拒绝新的调用；已接纳的操作可能继续完成。", () => api("/grants/" + encodeURIComponent(grant.id) + "/revoke", "POST"), "授权已撤销。"), "danger"));
         item.append(actions);
       }
       list.append(item);
     }
     if (!selected.length) empty("当前状态下没有授权。", list);
-    controls.replaceChildren(chips(["全部", "有效", "已过期", "已撤销"], filters.grants, value => {filters.grants = value; draw();}, "授权状态"));
+    controls.replaceChildren(chips(["全部", "有效", "即将过期", "已过期", "已撤销"], filters.grants, value => {filters.grants = value; draw();}, "授权状态"));
   };
   content.append(searchField("搜索授权", "搜索客户端、资源或工具", filters.grantQuery, value => {filters.grantQuery = value; draw();}), controls, list); draw();
 }
 const actionNames = {
+  "grant.reissue": "重签发授权", "gmail_search": "搜索邮件", "gmail_read": "读取邮件",
+  "ssh_status": "查询服务状态", "ssh_logs": "读取服务日志", "github_contents": "读取仓库文件",
+  "github_issues": "查询议题", "github_pulls": "查询合并请求", "instabox_describe": "查询机器状态",
+  "instabox_diagnostics": "运行受限诊断", "unknown_tool": "未授权工具",
   "connection.create": "创建连接", "connection.created": "创建连接", "connection.test": "测试连接", "connection.delete": "删除连接", "connection.disconnect": "删除连接",
   "connection_create": "创建连接", "connection_test": "测试连接", "connection_delete": "删除连接", "grant_create": "签发授权", "grant_revoke": "撤销授权", "grant.create": "签发授权", "grant.revoke": "撤销授权", "gmail.search": "搜索邮件", "gmail.read": "阅读邮件",
   "ssh.status": "查询服务状态", "ssh.logs": "读取服务日志", "github.repositories": "查看仓库", "github.file": "读取仓库文件",
@@ -504,6 +562,43 @@ const outcomes = {ok: "成功", success: "成功", denied: "已拒绝", error: "
 function renderAudit(audit, connections) {
   const toolbar = node("div", undefined, "audit-toolbar");
   const holder = node("div"); const resultFilter = node("div");
+  const dateRange = node("div", undefined, "audit-date-range");
+  const from = node("input"); from.type = "date"; from.id = "audit-from";
+  const to = node("input"); to.type = "date"; to.id = "audit-to";
+  const fromLabel = node("label", "开始日期"); fromLabel.htmlFor = from.id;
+  const toLabel = node("label", "结束日期"); toLabel.htmlFor = to.id;
+  const feedback = node("p", "按浏览器本地日期导出，最多 31 天；留空导出最近 31 天。", "field-help");
+  feedback.id = "audit-export-feedback"; feedback.setAttribute("role", "status");
+  from.setAttribute("aria-describedby", feedback.id); to.setAttribute("aria-describedby", feedback.id);
+  function range() {
+    const now = Math.floor(Date.now() / 1000);
+    const end = to.value ? Math.min(now, Math.floor(new Date(to.value + "T23:59:59").getTime() / 1000)) : now;
+    const start = from.value ? Math.floor(new Date(from.value + "T00:00:00").getTime() / 1000) : Math.max(0, end - 31 * 86400);
+    if (start > end || end - start > 31 * 86400) throw new Error("请选择开始不晚于结束、跨度最多 31 天且不晚于今天的日期范围。");
+    const today = new Date(); const localToday = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, "0"), String(today.getDate()).padStart(2, "0")].join("-");
+    if (from.value > localToday || to.value > localToday) throw new Error("日期不能晚于今天。");
+    return new URLSearchParams({after: String(start), before: String(end)});
+  }
+  const exportButton = button("导出 CSV", async () => {
+    let url;
+    try { url = "/admin/api/v1/audit/export.csv?" + range(); }
+    catch (error) { feedback.textContent = error.message; return; }
+    exportButton.disabled = true; feedback.textContent = "正在下载…";
+    try {
+      const response = await fetch(url, {credentials: "same-origin", cache: "no-store"});
+      if (!response.ok) throw new Error("导出失败，请检查日期范围或重新登录后重试。");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const link = node("a"); link.href = objectUrl; link.download = "cred-broker-audit.csv"; link.click();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      feedback.textContent = "CSV 已下载。";
+    } catch (error) { feedback.textContent = error.message; }
+    finally { exportButton.disabled = false; }
+  }, "quiet");
+  for (const input of [from, to]) input.addEventListener("change", () => {
+    try { range(); feedback.textContent = "日期有效，可导出 CSV。"; }
+    catch (error) { feedback.textContent = error.message; }
+  });
+  dateRange.append(fromLabel, from, toLabel, to, exportButton, feedback);
   function draw() {
     holder.replaceChildren();
     const entries = audit.filter(entry => {
@@ -524,7 +619,7 @@ function renderAudit(audit, connections) {
     }
     wrap.append(table); holder.append(node("p", entries.length + " 条操作记录", "result-count"), wrap);
   }
-  toolbar.append(searchField("搜索操作记录", "搜索客户端、操作或资源", filters.audit.query, value => {filters.audit.query = value; draw();}), resultFilter);
+  toolbar.append(searchField("搜索操作记录", "搜索客户端、操作或资源", filters.audit.query, value => {filters.audit.query = value; draw();}), resultFilter, dateRange);
   content.append(toolbar, holder); draw();
 }
 
@@ -559,7 +654,7 @@ async function render(focus = false) {
       byId("nav-connections-count").hidden = connections.length === 0;
     }
     if (page === "grants" && byId("nav-grants-count")) {
-      const activeGrants = data.grants.filter(grant => grantState(grant) === "有效").length;
+      const activeGrants = data.grants.filter(grant => ["有效", "即将过期"].includes(grantState(grant))).length;
       byId("nav-grants-count").textContent = activeGrants;
       byId("nav-grants-count").hidden = activeGrants === 0;
     }

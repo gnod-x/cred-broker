@@ -1,12 +1,14 @@
 # Cred Broker · 授权中心
 
+[English overview](README.en.md) · [贡献指南](CONTRIBUTING.md) · [集成指南](docs/integration.md)
+
 一个可自部署的开源授权网关：连接 Gmail、SSH、GitHub 和 Instabox，按资源、工具和有效期把权限交给 AI。服务负责使用真实凭证，AI 获得的是可撤销的短期网关令牌。
 
 首版面向个人和小团队的单实例部署。管理台为简体中文，前端无需构建、无需 CDN；提供标准 MCP Streamable HTTP，使用 MIT 许可证。不包含模型账号或模型 API 授权。
 
 ![v0.2.0 连接目录与服务授权入口](docs/images/console-v020.png)
 
-**v0.2.0 已完成隔离环境验收并发布。** 当前 `main` 增加 v0.2.1 反向代理来源校验修复：配置精确的 `CB_PUBLIC_ORIGIN` 后，可通过 HTTPS 域名登录管理台，同时保留来源校验和 Secure Cookie。v0.2.1 的 CI、镜像与 staging 状态见 [验收记录](docs/validation.md)。
+**v0.3.0 已完成云端隔离验收，正在核验发布。** 该版本加入运行诊断、连接最近测试状态、授权到期筛选与同范围重签发，并提供 MCP 接入配置、provider 能力描述、脱敏审计 CSV、本地 doctor、备份预检和短期管理会话。它也包含 v0.2.1 的 `CB_PUBLIC_ORIGIN` 反向代理来源校验修复。CI、镜像状态与验证边界见 [验收记录](docs/validation.md)。
 
 ## 已实现
 
@@ -40,6 +42,8 @@ docker compose ps
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 your-user@your-server
 ```
+
+端口冲突时可在 `.env` 设置 `CB_HOST_PORT=18765`；这只改变宿主机回环端口，容器内部仍使用 8765。浏览器管理会话使用独立随机值，有效期 8 小时，退出或重启服务后失效；升级到本版本需重新登录。登录尝试按来源最多每分钟 8 次、实例合计每分钟 64 次，超限返回 `429` 与 `Retry-After`。反向代理后的用户可能共享来源额度；管理 API 仍可使用 `X-Admin-Token`。
 
 需要域名时，在可信 HTTPS 反向代理后部署，同时让代理访问内部端口。设置 `CB_PUBLIC_ORIGIN` 为精确的外部 origin（例如 `https://broker.example.com`），以保持管理写请求的同源校验和 Secure 会话 Cookie；不要无条件信任公网客户端传来的 `X-Forwarded-*`。管理员页面与 MCP 共用服务端口，使用不同认证。
 
@@ -100,6 +104,25 @@ Instabox 把远程执行包含在 `machines:write` 中；网关进一步限制�
 
 MCP 地址为 `http://localhost:8765/mcp`，认证头为 `Authorization: Bearer <本次签发的网关令牌>`。MCP 客户端的配置方式因产品而异，可在支持 HTTP MCP 和自定义 Bearer 的客户端中填入这两项。客户端若仅支持 stdio，需要另配可信的 HTTP bridge；内置的是标准 HTTP 入口。
 
+管理台签发窗口会给出通用配置片段。片段只包含 MCP URL 和 `Bearer ${CRED_BROKER_TOKEN}` 占位符；不要把管理员令牌或实际网关令牌提交到仓库。当前仓库只验证标准 HTTP 请求和官方 MCP SDK 回环流程，不宣称已经兼容某个具体第三方客户端。
+
+管理员可在 `GET /admin/api/v1/ready` 查看版本、存储、主密钥和迁移状态。该接口需要管理员认证，不检查外部 provider，也不代表连接可用。连接目录中的“测试连接”是管理员显式触发的 provider 检查；结果只保存最近一次成功/失败时间和状态。
+
+集成方可用管理员认证的 `GET /admin/api/v1/providers/{provider}/schema` 获取连接表单和能力描述。返回值只包含非秘密 JSON Schema、OAuth/API key 认证模式、工具参数和资源约束；secret 字段仅描述字段名并标记 `writeOnly`，不会返回客户端 secret、私钥或 token。SSH 的资源以已创建连接的 `connection.resources` 为准，不能由通用正则推断主机范围。
+
+维护者可在运行服务的同一环境执行只读部署检查：
+
+```bash
+docker compose exec cred-broker python -m cred_broker doctor
+# 源码运行：在已配置 CB_* 的同一环境执行 python -m cred_broker doctor
+```
+
+doctor 会检查绑定地址、数据目录可写性、主密钥权限/长度、数据库权限、Google OAuth 配置是否齐全和管理员令牌长度；不会创建密钥、修改数据库、连接外部 provider 或打印秘密。独立 SQLite 数据库执行 `quick_check`；存在 WAL/SHM/journal 辅助文件时明确跳过完整性检查，提示对独立备份执行 `backup-check`。首次安装尚未生成数据库和主密钥时会明确提示将在首次启动初始化；有数据库却缺主密钥会报错，不能生成新密钥代替丢失密钥。
+
+「操作记录」页面支持按日期下载脱敏 CSV；接口为 `GET /admin/api/v1/audit/export.csv`，管理员认证后可用 `after`/`before` Unix 秒过滤，单次最多查询 31 天。导出仅含时间、客户端、动作、连接、资源和结果，不含工具参数、正文、secret 或 token。
+
+授权重签发使用 `POST /admin/api/v1/grants/{grant_id}/reissue`，可传 `{"ttl_seconds": 900}`。服务在一个事务中创建同范围的新 grant 并撤销旧 grant；新 token 只在该响应中出现一次，旧 token 立即不能用于新请求。
+
 下面是协议层示例，网关令牌由环境变量提供：
 
 ```bash
@@ -134,11 +157,20 @@ curl -sS http://localhost:8765/mcp \
 | `CB_DATA_DIR` | `/var/lib/cred-broker`，数据库和主密钥 |
 | `CB_BIND` | 源码运行 `127.0.0.1:8765`；容器内部 `0.0.0.0:8765` |
 | `CB_PUBLIC_ORIGIN` | 默认空；TLS 反向代理时设为精确的外部 origin，如 `https://broker.example.com` |
+| `CB_HOST_PORT` | Compose 宿主机回环端口，默认 8765 |
 | `CB_GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI` | 三项同时配置才开启 Gmail OAuth |
 | `CB_INSTABOX_CLI` | `/usr/local/bin/instabox`，由管理员指定的可执行文件 |
 | `CB_ENABLE_LEGACY` | 默认 false，仅迁移时按需启用旧管理和旧 HTTP 调用 |
 
 备份必须同时包含数据卷里的 `broker.db`、相关 WAL 状态和 `master.key`。最简单的方式是先 `docker compose stop`，再完整备份数据卷到加密存储，完成后 `docker compose start`。主密钥丢失后不能恢复凭证；数据库与主密钥一起泄露则可以解密，文件权限与主机隔离仍然必要。另行妥善保存 `.env`，不要提交到 Git。
+
+恢复前，可在安装了项目依赖的可信环境检查独立备份：
+
+```bash
+python -m cred_broker backup-check --db /secure/backup/broker.db --key /secure/backup/master.key
+```
+
+该命令核验 SQLite 完整性、必需表结构与全部已有加密记录，不写入原文件，不恢复数据，也不输出凭证。使用已停止写入的数据库副本或 SQLite backup API 导出的独立数据库；有 `-wal/-shm/-journal` 时会拒绝，应先在副本上合并状态或重新制作快照，不能直接删除有未合并数据的 WAL。空库无法确认密钥配对，输出会明确说明。通过预检后，仍须在独立环境恢复、解密连接并验证授权行为，完整恢复步骤见 [集成与运维说明](docs/integration.md)。
 
 升级前备份，记录现用 Git tag 或镜像版本，更新 Compose 中的目标镜像版本后拉取并启动；源码部署则重新构建。回滚同时考虑代码与数据格式，不能假定降级总兼容。新表与原有 cred-broker 的凭证、授权和 token 表隔离，不自动迁移旧授权；开启兼容模式的范围与边界见 [架构说明](docs/architecture.md)。
 
@@ -154,6 +186,9 @@ python3 -m venv .venv
 .venv/bin/python -IB tests/test_app.py
 .venv/bin/python -IB tests/test_ssh_transport.py
 .venv/bin/python -IB tests/test_mcp_sdk.py
+.venv/bin/python -IB tests/test_admin_auth.py
+.venv/bin/python -IB tests/test_doctor.py
+.venv/bin/python -IB tests/test_backup_check.py
 ```
 
 测试使用隔离数据库、假凭证与 mock upstream。SDK 测试启动临时回环 HTTP 服务器，通过官方 MCP Python 客户端完成握手、发现、调用和撤销验证。真实 Gmail、GitHub App 与 Instabox 账号授权需要部署者提供；mock 通过不代表那些账号已经连接。

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import re
@@ -22,6 +23,11 @@ HEAD = "https://api.github.com"
 UNIT = r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.service"
 MACHINE = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
 REPOSITORY = r"[A-Za-z0-9][A-Za-z0-9-]{0,99}/[A-Za-z0-9_.-]{1,100}"
+EMAIL = r"[^\s@]+@[^\s@]+"
+HOST = r"[A-Za-z0-9][A-Za-z0-9.:-]*"
+SSH_USER = r"[a-z_][a-z0-9_-]{0,31}"
+HOST_KEY = r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) [A-Za-z0-9+/]+={0,2}"
+INSTABOX_KEY = r"ibk_[A-Za-z0-9_.-]+"
 LIMIT = 65536
 
 NAMES = {
@@ -51,6 +57,115 @@ TOOLS = {
     "instabox": {"describe": ("Read sandbox state", {}, []),
                  "diagnostics": ("Run a fixed read-only sandbox diagnostic", {"action": {"type": "string", "enum": ["uptime", "disk", "memory"]}}, ["action"])},
 }
+
+
+def _text_schema(pattern=None, limit=256):
+    result = {"type": "string", "minLength": 1, "maxLength": limit,
+              "pattern": r"^[^\u0000]+(?![\s\S])", "not": {"pattern": r"\u0000"}}
+    if pattern:
+        result["pattern"] = "^(?:" + pattern + r")(?![\s\S])"
+    return result
+
+
+def _number_schema(maximum):
+    # Numeric strings are accepted by the validator, including up to 19 digits.
+    # JSON Schema cannot compare their numeric value; callers must keep server validation.
+    return {"oneOf": [{"type": "integer", "minimum": 1, "maximum": maximum},
+                      {"type": "string", "pattern": r"^[1-9][0-9]{0,18}(?![\s\S])",
+                       "description": f"Decimal integer string; server enforces value <= {maximum}.",
+                       "serverValidation": {"numericMaximum": maximum}}]}
+
+
+def _resource_array(pattern):
+    # Duplicate inputs are accepted and normalized by _list, not rejected.
+    return {"type": "array", "minItems": 1, "maxItems": 100,
+            "items": _text_schema(pattern)}
+
+
+def _setting_properties(provider):
+    if provider == "gmail":
+        return {"email": _text_schema(EMAIL)}
+    if provider == "ssh":
+        return {
+            "host": _text_schema(HOST),
+            "port": _number_schema(65535),
+            "user": {**_text_schema(SSH_USER), "not": {"const": "root"}},
+            "host_key": _text_schema(HOST_KEY, 8192),
+            "services": _resource_array(UNIT),
+        }
+    if provider == "github":
+        repositories = _resource_array(REPOSITORY)
+        repositories["items"]["allOf"] = [{"not": {"pattern": r"/\.{1,2}(?![\s\S])"}}]
+        return {"app_id": _number_schema(2**63 - 1),
+                "installation_id": _number_schema(2**63 - 1),
+                "repositories": repositories}
+    if provider == "instabox":
+        return {"machines": _resource_array(MACHINE)}
+    raise ValueError("Unsupported provider")
+
+
+def connection_schema(provider):
+    """Describe accepted input; enumFrom/serverValidation require server enforcement."""
+    if provider not in FIELDS:
+        raise ValueError("Unsupported provider")
+
+    settings_required, _, secret_required, secret_optional = FIELDS[provider]
+    settings = {"type": "object", "properties": _setting_properties(provider),
+                "required": list(settings_required), "additionalProperties": False}
+
+    # Gmail credentials are obtained through OAuth, never submitted as form fields.
+    secret_properties = {}
+    if provider != "gmail":
+        for name in (*secret_required, *secret_optional):
+            pattern = INSTABOX_KEY if provider == "instabox" else None
+            # Instabox keys pass a second _string validation with the default 256 limit.
+            limit = 256 if provider == "instabox" else 32768
+            secret_properties[name] = {**_text_schema(pattern, limit), "writeOnly": True}
+    secret_schema = {"type": "object", "properties": secret_properties,
+                     "required": [] if provider == "gmail" else list(secret_required),
+                     "additionalProperties": False}
+
+    tools = []
+    for name, (description, raw_properties, required) in TOOLS[provider].items():
+        properties = copy.deepcopy(raw_properties)
+        for key, field in properties.items():
+            if field.get("type") == "string":
+                properties[key] = {**_text_schema(limit=field.get("maxLength", 2048)), **field}
+        if provider == "gmail" and name == "read":
+            properties["message_id"] = _text_schema(r"[A-Za-z0-9_-]{1,128}", 128)
+        if provider == "github" and name == "contents":
+            properties["path"]["serverValidation"] = "Nonempty slash-separated segments; no dot segments or backslashes."
+        if provider == "ssh":
+            properties["unit"] = {**_text_schema(UNIT, 2048), "enumFrom": "settings.services"}
+        properties["resource"] = {"type": "string", "enumFrom": "connection.resources",
+                                  "description": "Must be one of this grant's authorized connection resources; enforced by server."}
+        tool = {"name": f"{provider}_{name}", "description": description,
+                "inputSchema": {"type": "object", "properties": properties,
+                                "required": list(dict.fromkeys([*required, "resource"])),
+                                "additionalProperties": False}}
+        if provider == "instabox" and name == "diagnostics":
+            tool["requires_secret"] = ["diagnostic_key"]
+            tool["description"] += "; available only when diagnostic_key is configured"
+        tools.append(tool)
+
+    resource_item = {
+        "gmail": _text_schema(EMAIL),
+        "ssh": {**_text_schema(limit=262), "enumFrom": "connection.resources",
+                "description": "Configured host (up to 256 characters) plus ':' and decimal port; server validated."},
+        "github": copy.deepcopy(_setting_properties("github")["repositories"]["items"]),
+        "instabox": _text_schema(MACHINE),
+    }[provider]
+    return {
+        "auth_mode": {"gmail": "oauth", "ssh": "ssh_key", "github": "github_app", "instabox": "api_key"}[provider],
+        "settings": settings,
+        "secret": secret_schema,
+        "tools": tools,
+        "resource_constraints": {
+            "type": "array", "items": resource_item,
+            "minItems": 1, "maxItems": 1 if provider in {"gmail", "ssh"} else 100,
+            "uniqueItems": True, "source": "connection.resources",
+        },
+    }
 
 
 def catalog():
@@ -92,14 +207,14 @@ def _settings(provider, settings):
     required, optional, _, _ = FIELDS[provider]
     clean = _fields(settings, required, optional)
     if provider == "gmail":
-        clean["email"] = _string(clean["email"], r"[^\s@]+@[^\s@]+").lower()
+        clean["email"] = _string(clean["email"], EMAIL).lower()
     if provider == "ssh":
-        clean["host"] = _string(clean["host"], r"[A-Za-z0-9][A-Za-z0-9.:-]*")
+        clean["host"] = _string(clean["host"], HOST)
         clean["port"] = _number(clean["port"], 65535)
-        clean["user"] = _string(clean["user"], r"[a-z_][a-z0-9_-]{0,31}")
+        clean["user"] = _string(clean["user"], SSH_USER)
         if clean["user"] == "root":
             raise ValueError("Use a dedicated non-root SSH account")
-        clean["host_key"] = _string(clean["host_key"], r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) [A-Za-z0-9+/]+={0,2}", 8192)
+        clean["host_key"] = _string(clean["host_key"], HOST_KEY, 8192)
         clean["services"] = _list(clean["services"], UNIT)
     if provider == "github":
         clean["app_id"] = _number(clean["app_id"], 2**63-1)
@@ -121,7 +236,7 @@ def validate_connection(provider, settings, secret):
         secrets[name] = _string(value, None if name == "private_key" else r"[!-~]+", 32768 if name == "private_key" else 4096)
     if provider == "instabox":
         for key in secrets.values():
-            _string(key, r"ibk_[A-Za-z0-9_.-]+")
+            _string(key, INSTABOX_KEY)
     return clean, secrets
 
 
