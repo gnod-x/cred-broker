@@ -1,11 +1,11 @@
 # 验收记录
 
 
-## v0.3.1 · 第一批 T00–T03 候选验收
+## v0.3.1 · 第一批 T00–T03 发布与部署验收
 
 日期：2026-11-25。环境为云机器 three 的隔离目录 /data/workspace/cred-broker-refactor-20261125；只使用合成凭证、临时库、mock provider、独立回环 HTTP/TLS 和专用 Compose 项目。本机生产目录、真实数据库/主密钥、账号授权与既有 LAN/Tailscale 拓扑未作为测试对象。
 
-本节记录主 agent 汇总的候选证据；公开 tag、GitHub CI、GHCR 推送与公开 digest 的结果须在实际执行后补充，不能从候选通过推断已发布。以下为第一批范围，不代表整份 17 卡路线完成。
+本节记录隔离候选、公开制品与本机部署的分层证据；公开发布与本机升级已实际完成。以下为第一批范围，不代表整份 17 卡路线完成。
 
 | 验证 | 候选结果 | 范围和限制 |
 | --- | --- | --- |
@@ -16,7 +16,8 @@
 | Chromium | 通过 | 完整fixture流程，11张截图；fixture已清理，未使用真实账号 |
 | 同一候选Compose镜像 | 通过 | verify_release_image.py验收下列准确image ID，含加固、doctor、加密、SQLite备份、原备份token经HTTP恢复/调用/撤销、重启持久性；合成provider |
 | 隔离TLS fixture | 通过 | 13项检查，使用指定cafile及主机名校验，未全局跳过TLS验证；这不是生产TLS启用或ADR代理模板已部署的证据 |
-| 公开tag / CI / GHCR | 待发布步骤 | 尚未在本节录入公开运行记录与registry digest；须由发布者核验后补充 |
+| 公开tag / CI / GHCR | 通过 | v0.3.1 指向 5cda69c；主分支 CI 45489438195、标签发布 45489837995 成功；匿名拉取固定摘要后独立验收通过 |
+| 本机 systemd / 面板 | 通过 | 已运行 v0.3.1，三地址登录/注销/拒绝重放及鉴权边界通过；面板原生检查 healthy/HTTP200，保留原账号、会话、4分组/23服务 |
 
 候选镜像 image ID：
 
@@ -25,6 +26,14 @@ sha256:95af0e9e67d1ba2c5cede9bdffcec288a49aef5ff49142e6c13a0dc4fb0548bc
 ```
 
 它是本地候选镜像的配置/内容标识，不是可用于公开registry拉取的manifest digest。发布流水线应先验证该次构建的准确候选，推送后拉回固定digest并核对image ID，再执行隔离验收。镜像内不能包含其自身最终OCI digest。
+
+公开镜像为 `ghcr.io/gnod-x/cred-broker:0.3.1`，固定摘要 `sha256:8bf8af58f34fd5e4afc178436ad29ca219db4fbb558961149cb5992ff7e5de7c`；OCI version 为 `0.3.1`、revision 为 `5cda69c73bbf4a2ce4f2fea5cbddb8ac05368844`。发布流水线先验证自己构建的同一候选再推送并拉回摘要复验；three 另用空 DOCKER_CONFIG 匿名拉取固定摘要，以唯一随机 Compose 项目再次通过加固、原快照 token HTTP 恢复、模拟调用、撤销和重启持久性验收。候选本地 image ID 与公开 registry digest 是不同阶段的标识，不要求相同。
+
+公开证据：[main CI](https://github.com/gnod-x/cred-broker/actions/runs/45489438195)、[tag test](https://github.com/gnod-x/cred-broker/actions/runs/45489838017)、[container release](https://github.com/gnod-x/cred-broker/actions/runs/45489837995)。
+
+本机已部署至 `/opt/cred-broker-releases/v0.3.1`：84 个安装源文件逐一与云端 manifest 核对，源归档 SHA256 为 `4176c73f35fdad8f9e555b059283d5cb4d52ca38ef3584c9e07ccd1e27ecd0cc`；Python 3.12.3 运行时依赖检查、12项启动回归和随机回环端口/临时库的真实 HTTP 登录注销通过。生产 venv 未额外安装 httpx 等测试依赖；ASGI 开发测试仍以云端和 CI 为证。本机正式切换后回环/LAN/Tailscale 三个地址的健康、认证 ready、登录注销和旧会话401、未认证 MCP/管理401、legacy404、恶意 Host400/Origin403通过。程序维持 broker 身份、单进程、192 MiB 和原 systemd 隔离；doctor 以服务身份通过，live WAL 项按设计跳过。
+
+停写备份与最终报告位于本机 root 私有 `/var/backups/cred-broker/pre-v0.3.1-20261125-arejnv47/`。首次备份门禁因导出副本继承 WAL 模式而停止并恢复旧程序；随后仅对导出目标用 SQLite 切为 DELETE 模式，独立预检通过后重新停写备份并完成切换，原始材料保留。生产环境文件与主密钥哈希未变，各表记录与停写快照一致；没有加密连接记录，配对为 `unproven`，不声称已用生产密文证明 key 配对。面板 ID27 的展示与健康 URL 保持 LAN，实际 API 与原生健康检查通过；临时维护会话已精确删除。验证覆盖同机三个地址和面板容器，未替代另一实体 LAN 设备或真实上游账号验收。
 
 14个脚本：test_core.py、test_control.py、test_providers.py、test_google.py、test_app.py、test_ssh_transport.py、test_mcp_sdk.py、test_admin_auth.py、test_doctor.py、test_backup_check.py、test_release_notes.py、test_startup.py、test_http_security.py、test_release_regressions.py。浏览器和容器脚本另列，不重复计入。
 

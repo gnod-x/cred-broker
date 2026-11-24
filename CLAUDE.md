@@ -2,7 +2,7 @@
 
 ## 来源与入口
 
-开发源码和本机运行目录分开维护。`dong-server` 的 `cred-broker.service` 用 systemd drop-in 选择 `/opt/cred-broker-releases/` 下的版本目录；当前运行 v0.3.0，仅监听 `127.0.0.1:8765`。原 v0.1.0 安装 `/opt/cred-broker` 用于回滚。更新开发源码不会更新运行实例；部署和回滚见本机 `~/.agent-context/verification/cred-broker-local-2026-11-21.md`。生产数据库、主密钥、环境文件和管理员登录均留在本机。
+开发源码和本机运行目录分开维护。`dong-server` 的 `cred-broker.service` 用 systemd drop-in 选择 `/opt/cred-broker-releases/` 下的版本目录；当前运行 v0.3.1，程序本体仅监听 `127.0.0.1:8765`。原 v0.1.0 安装 `/opt/cred-broker` 用于回滚。更新开发源码不会更新运行实例；本次部署和回滚见本机 `~/.agent-context/verification/cred-broker-local-2026-11-25.md`，旧记录保留在 `cred-broker-local-2026-11-21.md`。生产数据库、主密钥、环境文件和管理员登录均留在本机。
 
 部署默认使用 `compose.yaml`；Python 入口为 `python -m cred_broker`。管理台 `/admin`、管理 API `/admin/api/v1`、标准 MCP `POST /mcp`、存活检查 `/healthz`。契约详细行为见 [README](README.md)、[架构](docs/architecture.md)、[安全边界](docs/security.md)。
 
@@ -10,7 +10,7 @@
 
 ## v0.3.1 第一批实现范围
 
-本次代码实现计划 T00–T03：隔离基线、已有库启动失败关闭、HTTP 入口/实际接收预算、本地状态与审计同事务及结果未知流程；不代表 17 张任务卡全部完成。候选代码与真实生产分开，生产仍是上述 v0.3.0/LAN HTTP 拓扑；本轮未部署生产 TLS。最终候选与发布证据见 [验收记录](docs/validation.md)，后续任务见 [改造计划](docs/ai-refactor-plan-2026-11-25.md)。
+本次代码实现计划 T00–T03：隔离基线、已有库启动失败关闭、HTTP 入口/实际接收预算、本地状态与审计同事务及结果未知流程；不代表 17 张任务卡全部完成。v0.3.1 标签 `5cda69c73bbf4a2ce4f2fea5cbddb8ac05368844` 已发布，本机已切换至 `/opt/cred-broker-releases/v0.3.1`，沿用上述 LAN HTTP 拓扑；本轮未部署生产 TLS。非秘密版本 drop-in 来源为 [version config](deploy/cred-broker-version.conf)，精确允许 LAN/Tailscale 两个 HTTP origin；原环境文件、主密钥、数据与 192 MiB 限额保留。最终候选与发布证据见 [验收记录](docs/validation.md)，后续任务见 [改造计划](docs/ai-refactor-plan-2026-11-25.md)。
 
 正式入口必须经 startup.prepare_store；已有库缺 key/短 key 在打开 SQLite 前失败，错 key/坏密文/JSON/缺表列/坏权限失败关闭，不造替代 key、不修旧库。检查全部 legacy/scoped 记录，保持 32 字节二进制 key、nonce/AAD 不变。空库 key_pairing=unproven；ready 区分已加载 key、配对、storage 与必需表/列状态，不逐请求遍历解密全库。新安装私有暂存、fsync、无覆盖发布并串行化初始化；中断部分安装需恢复原配对。live WAL 使用正常只读连接，不用 immutable；容许空 sidecar/SHM 读者元数据，不做业务写/checkpoint。
 
@@ -37,7 +37,7 @@ web/MCP 共用精确 Host/Origin 策略和最外层实际字节/总读取期限�
 
 ## 验证与文档
 
-逻辑改动运行 `tests/test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`；认证与运维检查另跑 `test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`；SSH 变更加真实回环传输 `test_ssh_transport.py`，MCP 变更加官方 `test_mcp_sdk.py`，网页变更加 fixture 专用 `test_browser.py`。依赖在 requirements[-dev].txt。新增存储/入口/发布回归另跑 test_startup.py、test_http_security.py、test_release_regressions.py。所有脚本以隔离 Python 模式 .venv/bin/python -IB 执行；完整命令见 README。
+逻辑改动运行 `tests/test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`；认证与运维检查另跑 `test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`；SSH 变更加真实回环传输 `test_ssh_transport.py`，MCP 变更加官方 `test_mcp_sdk.py`，网页变更加 fixture 专用 `test_browser.py`。依赖在 requirements[-dev].txt。新增存储/入口/发布回归另跑 test_startup.py、test_http_security.py、test_release_regressions.py。14 个 Python 回归脚本以隔离模式 .venv/bin/python -IB 执行；browser/container 按各自 fixture 命令运行，完整命令见 README。
 
 测试只用临时数据库、假凭证和独立回环服务器；不连接用户真实 Gmail/仓库/SSH/Instabox 资源。真实账号验收需用户自行建立连接，报告必须区分 mock、协议联调和真实上游验证。
 

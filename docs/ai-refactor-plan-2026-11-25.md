@@ -1,22 +1,22 @@
 # Cred Broker 深度审查与 AI 分步改造计划
 
-日期：2026-11-25（Asia/Shanghai）。状态：**v0.3.1 第一批 T00–T03 已在隔离候选实现并验收；其余路线未整体实施，公开发布门禁单列**。
+日期：2026-11-25（Asia/Shanghai）。状态：**v0.3.1 第一批 T00–T03 已实现、验收、发布并部署；其余路线未整体实施**。
 
 适用对象：接手本项目的编码 AI、维护者与发布审核者。本文是执行规格，不代表可以直接修改生产入口、轮换真实凭证或迁移生产数据库。先完成隔离环境中的可审查实现和验收，再按部署门禁推进。
 
 
 ## 本次第一批执行记录（v0.3.1）
 
-环境：three:/data/workspace/cred-broker-refactor-20261125，独立源码与合成数据。基线完成后分工实施；当前代码不等于本机生产升级。完整候选证据见 [validation](validation.md)。
+环境：three:/data/workspace/cred-broker-refactor-20261125，独立源码与合成数据。基线完成后分工实施；v0.3.1 标签已通过公开流水线和匿名固定摘要复验，并已部署本机，原 LAN/Tailscale 入口保持。完整候选证据见 [validation](validation.md)。
 
 | 任务 | 本次状态 | 实际交付与边界 |
 | --- | --- | --- |
 | T00 | PASS | 独立云副本和venv、原有回归基线，保留生产与既有工作区内容 |
-| T01 | PASS（隔离候选） | prepare_store先只读校验所有legacy/scoped密文/JSON，缺/短/错key及部分安装失败关闭；私有无覆盖初始化；空库unproven；不新增sentinel/schema/key版本 |
+| T01 | PASS（本次发布） | prepare_store先只读校验所有legacy/scoped密文/JSON，缺/短/错key及部分安装失败关闭；私有无覆盖初始化；空库unproven；不新增sentinel/schema/key版本 |
 | T02 | PASS（隔离修复与方案） | Host/Origin精确白名单，正式入口禁转发头信任，实际字节/总读取期限；独立TCP/TLS fixture及LAN HTTPS ADR；生产TLS切换未执行 |
-| T03 | PASS（隔离候选） | 本地业务/审计同事务，一次性token窗口与丢响应恢复提示，OutcomeUnknown不自动重试；不保证远端exactly-once |
+| T03 | PASS（本次发布） | 本地业务/审计同事务，一次性token窗口与丢响应恢复提示，OutcomeUnknown不自动重试；不保证远端exactly-once |
 | T04–T14 | DEFERRED | 整体动作deadline/准入/输出、provider契约、MCP升级、入口manifest、完整凭证管理、正式schema/key版本及其他后续任务未整体实施 |
-| T15/T16发布门禁 | IN_PROGRESS（仅本次范围） | 同一候选image ID已完成隔离容器与原token HTTP恢复验证；tag/公开CI/GHCR摘要拉回和发布记录须按实际执行后补充 |
+| T15/T16发布门禁 | PASS（仅本次范围） | 同一候选验收、公开tag/CI/GHCR摘要拉回、原token HTTP恢复、本机备份/受控切换与面板实际API验证通过；不代表T15/T16未来全量体系已完成 |
 
 候选14个Python脚本、浏览器流程、Compose恢复和独立TLS检查已通过，细目与候选image ID见validation，不将历史结果或合成provider测试冒充真实账号验收。生产保留既有LAN HTTP及旧Tailscale入口；LAN不需要Tailscale，HTTP链路风险仍未消除。
 

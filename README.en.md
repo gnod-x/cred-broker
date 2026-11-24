@@ -4,7 +4,7 @@
 
 A self-hosted authorization gateway for AI tools. Keep upstream credentials in the broker and give AI a revocable, short-lived Bearer token scoped to one connection, explicit resources and tools. Credentials are encrypted at rest; no API returns them to AI.
 
-The console uses Simplified Chinese. This is a single-instance project for individuals and small teams, licensed under MIT. v0.3.1 is the first implementation batch of the November 25 plan (T00–T03), not completion of all 17 task cards. It adds fail-closed storage startup, exact HTTP ingress and bounded body reads, transactional local audit/state changes, and explicit unknown outcomes. See the [validation record](docs/validation.md) for candidate/publication evidence. The [v0.3.0 release notes](docs/releases/v0.3.0.md) remain historical release evidence.
+The console uses Simplified Chinese. This is a single-instance project for individuals and small teams, licensed under MIT. v0.3.1 is published and deployed locally as the first implementation batch of the November 25 plan (T00–T03), not completion of all 17 task cards. It adds fail-closed storage startup, exact HTTP ingress and bounded body reads, transactional local audit/state changes, and explicit unknown outcomes. See the [validation record](docs/validation.md) for publication and local deployment evidence. See the [v0.3.1 release notes](docs/releases/v0.3.1.md). The [v0.3.0 release notes](docs/releases/v0.3.0.md) remain historical release evidence.
 
 | Provider | Supported operations |
 | --- | --- |
