@@ -1,7 +1,7 @@
 """FastAPI 应用：管理网页 + AI 侧 MCP 端点。
 
 两条独立入口：
-- /admin/*   只绑定本机回环，管理页面
+- /admin/*   管理页面（对外入口由精确来源配置控制）
 - /mcp/*     AI 用 Bearer token 调用
 """
 
@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import ssh_exec
+from . import __version__, ssh_exec
 from .admin_auth import AdminAuth, LOGIN_WINDOW, SESSION_TTL
 from .broker import Broker, Denied
 from .config import Config
@@ -27,9 +27,9 @@ from .control import Control
 from .control_api import register_control_api
 from .google_oauth import GoogleSettings, register_google_oauth
 from .mcp import register_mcp
-from .origin import canonical_origin as _canonical_origin
 from .origin import canonical_public_origin as _canonical_public_origin
-from .store import MasterKey, Store
+from .startup import prepare_store
+from .security import HttpSecurityMiddleware, HttpSecurityPolicy
 
 HERE = Path(__file__).parent
 
@@ -62,9 +62,9 @@ def _as_dict(model: BaseModel) -> dict:
 
 
 def create_app(cfg: Config) -> FastAPI:
-    cfg.ensure_dirs()
     public_origin = _canonical_public_origin(cfg.public_origin)
-    store = Store(MasterKey(cfg.master_key_path), cfg.db_path)
+    policy = HttpSecurityPolicy.from_config(cfg)
+    store = prepare_store(cfg)
     raw_hosts = json.loads(cfg.hosts_json)
     if not isinstance(raw_hosts, dict):
         raise RuntimeError("CB_HOSTS 必须是 JSON 对象")
@@ -80,9 +80,9 @@ def create_app(cfg: Config) -> FastAPI:
         parameters = inspect.signature(templates.TemplateResponse).parameters
         if "request" not in parameters and "args" not in parameters:
             return templates.TemplateResponse(
-                name=name, context={"request": request, **context}, status_code=status_code
+                name=name, context={"request": request, "version": __version__, **context}, status_code=status_code
             )
-        return templates.TemplateResponse(request=request, name=name, context=context, status_code=status_code)
+        return templates.TemplateResponse(request=request, name=name, context={"version": __version__, **context}, status_code=status_code)
 
     @app.middleware("http")
     async def browser_security(request: Request, call_next):
@@ -91,27 +91,6 @@ def create_app(cfg: Config) -> FastAPI:
                   or (path.startswith("/admin/api/") and not path.startswith("/admin/api/v1/")))
         if legacy and not cfg.legacy_enabled:
             return JSONResponse({"detail": "旧版接口未启用"}, status_code=404)
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path != "/mcp":
-            origin = request.headers.get("origin")
-            if origin is not None:
-                try:
-                    origin = _canonical_origin(origin)
-                    request_origin = _canonical_origin(f"{request.url.scheme}://{request.url.netloc}")
-                except ValueError:
-                    origin = ""
-                    request_origin = ""
-                if not origin or origin not in {request_origin, public_origin}:
-                    return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
-            if request.headers.get("sec-fetch-site") == "cross-site":
-                return JSONResponse({"detail": "请从管理界面发起请求"}, status_code=403)
-        declared = request.headers.get("content-length")
-        if declared:
-            try:
-                oversized = int(declared) < 0 or int(declared) > 65536
-            except ValueError:
-                oversized = True
-            if oversized:
-                return JSONResponse({"detail": "请求过大"}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -127,6 +106,11 @@ def create_app(cfg: Config) -> FastAPI:
                 "form-action 'self'; object-src 'none'"
             )
         return response
+
+    # ASGI boundary runs outside the response-header/legacy middleware.
+    app.add_middleware(HttpSecurityMiddleware, policy=policy,
+                       max_body_bytes=cfg.max_request_body_bytes,
+                       read_timeout=cfg.body_read_timeout)
 
     # ---------- 鉴权 ----------
 
@@ -150,7 +134,7 @@ def create_app(cfg: Config) -> FastAPI:
     google_settings = GoogleSettings.load()
     register_control_api(app, control, require_admin, google_oauth_enabled=google_settings is not None)
     register_google_oauth(app, control, require_browser_admin, google_settings)
-    register_mcp(app, control)
+    register_mcp(app, control, security_policy=policy)
 
     def resolve_ai(authorization: str | None) -> tuple[dict, object]:
         if not authorization or not authorization.lower().startswith("bearer "):

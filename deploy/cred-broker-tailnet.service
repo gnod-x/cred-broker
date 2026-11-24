@@ -1,0 +1,24 @@
+[Unit]
+Description=Cred Broker fixed loopback proxy for LAN and Tailscale addresses
+Requires=cred-broker.service
+After=cred-broker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=64 127.0.0.1:8765
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=32M
+TasksMax=16
+Restart=on-failure
+RestartSec=3s

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
+from cred_broker import __version__
 from cred_broker.app import create_app
 from cred_broker.config import Config
 from cred_broker.store import MasterKey
@@ -131,7 +132,7 @@ class ManagementTest(unittest.TestCase):
             self.assertIn("SameSite=strict", cookie)
             ready = await client.get("/admin/api/v1/ready")
             self.assertEqual(ready.status_code, 200)
-            self.assertEqual(ready.json()["version"], "0.3.0")
+            self.assertEqual(ready.json()["version"], __version__)
             self.assertEqual(ready.json()["storage"], "ready")
             self.assertEqual(ready.json()["key"], "ready")
             self.assertEqual(ready.json()["migrations"], "current")
@@ -239,6 +240,67 @@ class ManagementTest(unittest.TestCase):
             ciphertext = loaded.aead().encrypt(nonce, b"fixture", b"fixture")
             self.assertEqual(MasterKey(key).aead().decrypt(nonce, ciphertext, b"fixture"), b"fixture")
 
+
+
+class T03ManagementOutcomeTests(unittest.TestCase):
+    def test_ready_pairing_is_safe_and_unproven_is_not_a_storage_failure(self):
+        from types import SimpleNamespace
+        from cred_broker.control import Control
+        from cred_broker.store import Store
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = Store(MasterKey(root / "key"), root / "db")
+            control = Control(store)
+            for pairing in ("verified", "unproven", "synthetic-private-error"):
+                with self.subTest(pairing=pairing):
+                    control.store = SimpleNamespace(db_path=store.db_path, key=store.key, pairing_status=pairing)
+                    ready = control.ready()
+                    self.assertEqual(ready["storage"], "ready")
+                    self.assertEqual(ready["key"], "ready")
+                    self.assertEqual(ready["key_pairing"], pairing if pairing != "synthetic-private-error" else "unavailable")
+                    self.assertNotIn("synthetic-private-error", str(ready))
+
+    def test_unknown_external_connection_test_is_not_a_definite_failure(self):
+        from cred_broker.control import Control, OutcomeUnknown
+        with tempfile.TemporaryDirectory() as root:
+            app = create_app(config(root))
+            async def request():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+                    with patch.object(Control, "test_connection", side_effect=OutcomeUnknown()) as execute:
+                        response = await client.post("/admin/api/v1/connections/fixture/test",
+                                                     headers={"X-Admin-Token": ADMIN})
+                    execute.assert_called_once_with("fixture")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertFalse(response.json()["ok"])
+                    self.assertEqual(response.json()["outcome"], "outcome_unknown")
+                    self.assertFalse(response.json()["retryable"])
+                    self.assertIn("do not retry automatically", response.json()["result"])
+                    self.assertNotIn("Connection test failed", response.text)
+            asyncio.run(request())
+
+    def test_first_issue_audit_failure_returns_no_token_and_leaves_no_grant(self):
+        from cred_broker.control import Control
+        with tempfile.TemporaryDirectory() as root:
+            app = create_app(config(root))
+            async def request():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+                                             headers={"X-Admin-Token": ADMIN}) as client:
+                    created = await client.post("/admin/api/v1/connections", json={
+                        "provider": "instabox", "label": "Fixture", "settings": {"machines": ["fixture-machine"]},
+                        "secret": {"read_key": "ibk_fixture"}})
+                    self.assertEqual(created.status_code, 201)
+                    ident = created.json()["connection"]["id"]
+                    before_audit = (await client.get("/admin/api/v1/audit")).json()
+                    with patch.object(Control, "_write_audit", side_effect=RuntimeError("synthetic-private-audit-error")):
+                        response = await client.post("/admin/api/v1/grants", json={
+                            "client": "fixture-ai", "connection_id": ident, "resources": ["fixture-machine"],
+                            "tools": ["instabox_describe"], "ttl_seconds": 120})
+                    self.assertEqual(response.status_code, 503)
+                    self.assertNotIn("synthetic-private-audit-error", response.text)
+                    self.assertNotIn('"token"', response.text)
+                    self.assertEqual((await client.get("/admin/api/v1/grants")).json(), {"grants": []})
+                    self.assertEqual((await client.get("/admin/api/v1/audit")).json(), before_audit)
+            asyncio.run(request())
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,39 +1,57 @@
 # 架构与运行边界
 
-cred-broker 是单实例凭证代理。管理员在管理页建立连接并签发授权；AI 只获得一个授权的 Bearer token，通过 MCP 调用预设动作。系统没有返回凭证、通用 shell 或任意 URL 转发的新接口，也没有团队 RBAC、多租户或分布式控制面。
+cred-broker 是单实例凭证代理。管理员建立连接并签发授权；AI 只获得一个授权的 Bearer token，通过 MCP 调用预设动作。系统没有返回凭证、通用 shell 或任意 URL 转发的新接口，也没有团队 RBAC、多租户或分布式控制面。
+
+v0.3.1 对应 2026-11-25 计划的第一批 T00–T03：基线、启动保护、入口和请求读取边界、本地事务与结果语义。它不是整份改造路线的完成版本。发布与测试状态以 [验收记录](validation.md) 为准。
 
 ## 入口与数据流
 
-管理页面使用管理员会话；`/admin/api/v1` 提供连接、授权与审计管理。管理员认证的 `GET /admin/api/v1/ready` 只检查本地版本、SQLite schema、主密钥可用性和已支持 provider 列表，不拨测外部 provider。`GET /admin/api/v1/providers/{provider}/schema` 提供不含秘密的连接字段、工具和资源约束，供自部署项目生成表单或接入检查。Gmail 连接只能由管理员浏览器完成 Google OAuth 回调后建立，普通连接创建接口拒绝 Gmail。管理员认证与 MCP Bearer 分离。
+管理页面使用管理员会话；`/admin/api/v1` 提供连接、授权与审计管理。管理员认证的 `GET /admin/api/v1/ready` 返回版本、storage、key、key_pairing、migrations 和支持的 provider 列表。key 表示密钥已加载，key_pairing 是启动时扫描得到的 verified/unproven；空库没有密文可供证明，因此为 unproven。该接口不在每次请求时遍历解密全库，也不拨测外部 provider。schema current 只是当前必需表/列检查，不是正式 schema 版本机制。
 
-AI 使用标准 Streamable HTTP `POST /mcp`。传输无状态，不签发 MCP 会话 ID；支持 initialize、initialized 通知、ping、tools/list 和 tools/call。响应使用 JSON，通知返回 202，不提供 SSE 持久流，GET 返回 405。每次请求验证 Bearer、协议和 Origin；工具调用再次读取授权。发现结果只包含该授权的工具，resource 参数枚举被限制为该授权的资源。
+`GET /admin/api/v1/providers/{provider}/schema` 提供不含秘密的字段、工具和资源约束。Gmail 只能由管理员浏览器完成 Google OAuth 回调后建立。管理会话、管理 API 令牌与 MCP Bearer 是不同的认证边界。
 
-执行路径为：哈希 token 查找授权 → 检查连接存在、有效期和撤销状态 → 精确核对工具与资源 → provider 执行固定操作并注入凭证 → 结果脱敏 → 记录调用结果。工具清单不会提供 secret。管理员触发连接测试时，只更新连接最近测试的时间和成功/失败状态，不持久化 provider 响应正文。
+AI 使用无状态 Streamable HTTP `POST /mcp`，支持 initialize、initialized 通知、ping、tools/list 和 tools/call。响应使用 JSON，通知返回 202，不提供 SSE 持久流，GET 返回 405。每次请求验证 Bearer、协议及入口策略；工具调用再次读取授权。发现结果只包含授权内工具与资源。
 
-## 存储与加密
+执行路径为：哈希 token 查找授权 → 复核连接、有效期与撤销状态 → 精确核对工具和资源 → provider 使用凭证执行固定操作 → 结果脱敏 → 记录有限结果。清单不会返回 secret。
 
-浏览器登录后签发独立的随机会话，只在进程内保存 SHA-256 和单调时钟到期时间，最长 8 小时。重复登录替换当前浏览器原会话，注销撤销其服务端哈希，重启清除全部会话；现有 `X-Admin-Token` 认证保留。登录尝试以 60 秒窗口限制单来源 8 次、实例合计 64 次，队列与会话最多分别保留 64/128 项。它们都只适用于单进程；反向代理后的来源可能共享额度。
+## HTTP 接收边界
 
-新接口复用 Store 的 SQLite 数据库和 MasterKey，但使用独立表：
+web 和 MCP 共用 `HttpSecurityPolicy` 与最外层 ASGI 中间件。Host 必须匹配允许的精确 origin 的 authority；允许来源来自维护用回环地址/监听端口、`CB_ALLOWED_ORIGINS` JSON 数组和可选 `CB_PUBLIC_ORIGIN`。不能从请求 Host 反推白名单。非默认的 Compose 宿主机映射端口必须登记对应外部 origin。
 
-- `scoped_connections`：连接 ID、名称、provider、随机 nonce、密文和创建时间。
-- `scoped_grants`：客户端标识、单个 connection_id、精确资源列表、工具列表、token 哈希、创建/到期/撤销时间。
-- `scoped_audit`：时间、客户端、动作、连接、授权内资源和结果。
+请求若带 Origin，只接受规范化后的精确白名单；拒绝 null、畸形或重复 Origin，拒绝缺失/重复或未登记的 Host。没有 Origin 的原生 API/MCP 客户端仍须通过 Host 和各自认证。修改请求的 `Sec-Fetch-Site: cross-site` 会被拒绝。
 
-连接 settings 和 secret 一并使用 AES-256-GCM 加密，AAD 绑定连接 ID。主密钥与数据库分开保存；单独复制数据库不足以解密。管理员连接清单解密后仅返回经 provider 校验的 settings、资源和工具，不返回 secret。
+中间件对所有 HTTP 路由累计实际接收字节，默认上限 65536 字节，`CB_MAX_REQUEST_BODY` 可在 1024–65536 之间配置；默认整个请求体读取期限 10 秒，`CB_BODY_READ_TIMEOUT` 必须大于 0 且不超过 60 秒。它覆盖 JSON、form 与 chunked 读取，不依赖 Content-Length 声明。超限返回 413，读取到期返回 408；这些是入口读取预算，不是整个 provider 动作 deadline 或最终响应预算，后两者仍在后续 T04。
 
-每个新授权产生一个随机 Bearer，明文只在签发响应出现，数据库只存 SHA-256。TTL 为 1–86400 秒，不支持通配资源或通配工具。创建授权使用 SQLite `BEGIN IMMEDIATE` 事务检查连接与范围后写入。重签发沿用原 client、connection、resource 和 tool 范围，在同一事务中创建新 grant 并撤销旧 grant。
+正式 Python 入口显式关闭 Uvicorn 的 proxy_headers，并清空 forwarded_allow_ips。原样 TCP 代理下不信任客户端伪造的转发头；后端只能看到代理 peer，登录限流可能由所有 LAN 用户共享。TLS 与名称/信任选择见 [LAN HTTPS ADR](adr/0001-lan-https.md)。
 
-审计表最多保留最近 5000 条。管理 API 和页面默认读取最近 200 条；CSV 导出接受 `after`/`before` Unix 秒，查询区间最多 31 天，且只投影六个有限字段。导出值会进行 CSV 公式注入防护，响应固定文件名并禁止缓存。
+## 启动、存储与加密
 
-## 撤销与并发
+正式启动调用 `prepare_store(cfg)`。已有库在任何 schema/journal 写操作前检查密钥、0400/0600 权限及服务属主，并以正常 `mode=ro` 事务检查 SQLite、必需表/列及全部 legacy/scoped 密文的 AES-GCM 和 JSON 结构。已有库缺 key、短 key、错 key、坏密文或结构不完整均失败关闭，不造替代 key、不修权限、不删除坏库。缺 key 和短 key 在打开 SQLite 前失败。
 
-进程内 RLock 将调用接纳与撤销、断开同步。已接纳的在途请求可以完成，撤销不会取消远端已执行动作；撤销后新接纳的调用会被拒绝。断开连接同时撤销关联授权，随后所有关联 token 不再可解析。工具发现也复核撤销与到期状态。
+新安装仅在 key/db 均不存在时初始化：父目录 flock 串行化初始化，私有临时文件完整写入并 fsync 后，以不覆盖目标的 hard-link 发布。两个独立文件不能作为一个文件系统操作提交；中断留下 key-only/db-only 时，下次启动明确拒绝，需恢复原配对，不猜测“空安装”。不新增 sentinel、密钥 ID、正式 schema 版本或密文格式。
 
-必须只运行一个 worker。RLock 不跨进程，不能把该语义扩展到多 worker 或多个实例。SQLite WAL 适合个人或小团队的低并发单实例；分布式锁、集中数据库、任务取消和规模化管理属于后续工作。
+启动读取 live WAL 一律使用普通只读连接，不能使用 immutable 忽略 WAL。SQLite 可以创建空辅助文件或更新 SHM 读者元数据；这不同于业务写入或 checkpoint。独立 `backup-check` 才要求无 sidecar，并使用 immutable 核验输入。
 
-## 审计与兼容
+新接口沿用 SQLite 和 MasterKey，使用独立 scoped 表：
 
-新审计覆盖新工具调用及管理员的连接创建、测试、断开、授权创建、重签发和撤销。管理员事件 client 固定为 admin，resource 为空；连接测试失败也记录 failed。这不是完整管理操作或 OAuth 审计。只记录有限字段和 ok/denied/failed，不记录 settings、secret、token、参数或响应正文。库内最多保留最近 5000 条，管理 API 返回最近 200 条。
+- scoped_connections：连接身份、provider、nonce、密文、创建时间及最近连接测试状态。
+- scoped_grants：client、单个 connection_id、精确资源/工具列表、token 哈希及时间状态。
+- scoped_audit：时间、client、动作、连接、授权内资源与结果。
 
-旧凭证、grant/token 和旧审计表与新表隔离，不自动迁移或交叉认证。旧 API 默认关闭；只有明确设置 `CB_ENABLE_LEGACY=true` 才开放兼容入口。旧授权支持动作模式及更宽的 SSH/HTTP 行为，不能视为新接口的同等精确授权。迁移客户端后应关闭兼容入口。
+settings 与 secret 一并使用 AES-256-GCM 加密，AAD 绑定连接 ID；legacy AAD 保持凭证名。主密钥是严格 32 字节二进制文件，不 strip。新授权明文 token 只在签发响应出现，数据库存 SHA-256，TTL 为 1–86400 秒。
+
+## 本地事务、外部结果与并发
+
+创建连接、创建授权、撤销、断开、重签发的本地业务修改与有限审计在同一 SQLite 事务提交；审计失败会回滚本地业务修改。首次签发和重签发均保护一次性 token 窗口。收到响应后需先保存 token，再关闭窗口；网络失败时先核对授权清单，不能直接重复签发。
+
+远端动作与 SQLite 不能原子提交。已接纳的 provider 操作可能完成，但结果处理或本地审计失败，此时控制层使用 OutcomeUnknown。管理连接测试返回 outcome_unknown 与 retryable=false；MCP 在工具结果中返回 isError、outcome_unknown 和不自动重试提示。它不是“远端一定失败”或 exactly-once 保证。结果未知时先核对上游及本地状态。
+
+进程内 RLock 将调用接纳与撤销、断开同步。已接纳请求可能完成；撤销后新接纳调用拒绝。必须只运行一个 worker，锁不跨进程。SQLite WAL 面向低并发单实例；全局/provider 准入、完整动作 deadline 与集中存储尚未实施。
+
+## 会话、审计与兼容
+
+浏览器会话是随机值，内存仅存哈希和最长 8 小时到期时间；注销和重启使旧会话失效。管理 API 的 X-Admin-Token 保留全权能力。登录按 60 秒窗口限制每来源 8 次、全实例 64 次；会话库存最多 128。代理后的用户可能共享额度。
+
+审计最多保留 5000 条，页面默认读取最近 200 条；CSV 限 31 天窗口，只有 ts/client/action/connection_id/resource/outcome，并防 CSV 公式注入。记录有限结果，不记录 secret、token、settings、参数、正文；它不是不可篡改日志，也未覆盖所有 OAuth/认证拒绝事件。
+
+旧凭证、grant/token 和审计表与 scoped 表隔离，不迁移或交叉认证。旧 API 默认关闭，只有 CB_ENABLE_LEGACY=true 才开放兼容入口。旧动作通配和更宽 SSH/HTTP 行为不具备 scoped 模型的同等精确授权边界。

@@ -32,7 +32,8 @@ def main() -> None:
     sock.listen(128)
     sock.set_inheritable(True)
 
-    config = uvicorn.Config(app, log_level=os.environ.get("CB_LOG_LEVEL", "info"), access_log=False)
+    config = uvicorn.Config(app, log_level=os.environ.get("CB_LOG_LEVEL", "info"),
+                            access_log=False, proxy_headers=False, forwarded_allow_ips="")
     server = uvicorn.Server(config)
     server.run(sockets=[sock])
 

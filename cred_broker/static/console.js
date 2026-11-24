@@ -93,11 +93,15 @@ async function api(path, method = "GET", body, signal) {
   });
   if (response.status === 401) {
     location.assign("/");
-    throw new Error("会话已过期，请重新登录。");
+    const error = new Error("会话已过期，请重新登录。");
+    error.status = 401;
+    throw error;
   }
   if (!response.ok) {
     const messages = {400: "请检查输入后重试。", 403: "当前操作无权限。", 404: "资源不存在或已删除。", 409: "操作与现有记录冲突。", 422: "输入未通过校验，请检查字段。"};
-    throw new Error(messages[response.status] || "操作失败，请稍后重试。");
+    const error = new Error(messages[response.status] || "操作失败，请稍后重试。");
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? {} : response.json();
 }
@@ -117,6 +121,7 @@ function fail(error) {
 
 function showDialog(title) {
   dialogGeneration++;
+  delete dialog.dataset.issueState;
   dialogContent.replaceChildren();
   dialogError.hidden = true;
   byId("dialog-title").textContent = title;
@@ -144,13 +149,17 @@ async function showDiagnostics() {
 }
 
 function closeDialog() {
+  if (dialog.dataset.preventCancel === "true") return;
   dialogGeneration++; dialogContent.replaceChildren(); dialog.close();
 }
 
 dialog.addEventListener("cancel", (event) => { if (dialog.dataset.preventCancel === "true") { event.preventDefault(); return; } dialogGeneration++; dialogContent.replaceChildren(); });
 byId("close-dialog").addEventListener("click", closeDialog);
 byId("diagnostics")?.addEventListener("click", showDiagnostics);
-dialog.addEventListener("close", () => { dialogGeneration++; dialogContent.replaceChildren(); });
+dialog.addEventListener("close", () => { dialogGeneration++; dialogContent.replaceChildren(); delete dialog.dataset.issueState; });
+window.addEventListener("beforeunload", (event) => {
+  if (dialog.dataset.issueState === "pending") { event.preventDefault(); event.returnValue = ""; }
+});
 
 function submitForm(form, text, action, options = {}) {
   let submitting = false;
@@ -334,7 +343,13 @@ async function testConnection(connection) {
   health.set(connection.id, {testing: true});
   dialogContent.append(node("p", "正在测试连接…", "loading-state"));
   try {
-    const {ok} = await api("/connections/" + encodeURIComponent(connection.id) + "/test", "POST");
+    const result = await api("/connections/" + encodeURIComponent(connection.id) + "/test", "POST");
+    if (result.outcome === "outcome_unknown") {
+      health.delete(connection.id);
+      if (generation === dialogGeneration) dialogContent.replaceChildren(node("p", "测试可能已经完成，但本地结果未能确认。请先刷新连接状态，不要自动重试。"));
+      return;
+    }
+    const {ok} = result;
     health.set(connection.id, {ok, checkedAt: Date.now()});
     if (generation === dialogGeneration) dialogContent.replaceChildren(node("p", ok ? "连接测试通过。" : "连接测试未通过，请检查服务配置和凭证。"));
     void render();
@@ -432,10 +447,51 @@ function checkboxGroup(title, name, entries) {
   return group;
 }
 
+const issueRecovery = "若网络中断、刷新或关闭页面后未拿到令牌，请先刷新授权列表，按客户端、连接与签发时间核对，再撤销或重签发对应授权；不要直接重复签发。";
+
+async function issueGrant(path, payload, isCurrent) {
+  dialog.dataset.issueState = "pending";
+  const controller = new AbortController();
+  // Aborting the browser wait does not roll back an accepted server mutation.
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const result = await api(path, "POST", payload, controller.signal);
+    if (typeof result.token !== "string" || !result.token) throw new Error("Missing one-time token");
+    if (isCurrent()) {
+      showToken(result.token);
+      dialog.dataset.issueState = "success";
+    } else {
+      notice("签发请求已完成。未保存令牌时，请刷新授权列表并撤销或重签发对应授权。");
+    }
+    void render();
+  } catch (error) {
+    if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) {
+      if (isCurrent()) dialog.dataset.issueState = "failed";
+      throw error;
+    }
+    if (isCurrent()) {
+      showDialog("授权签发结果待确认");
+      dialog.dataset.issueState = "unknown";
+      const explanation = node("p", "请求结果未能确认，授权可能已经生效。为避免产生重复授权，本窗口不会自动重试。");
+      explanation.setAttribute("role", "status");
+      dialogContent.append(explanation, node("p", issueRecovery), button("刷新授权列表", async () => {
+        filters.grants = "全部"; filters.grantQuery = "";
+        closeDialog();
+        if (location.hash === "#grants") await render(); else await navigate("grants");
+        notice("请核对客户端、连接和签发时间，撤销或重签发未保存令牌的授权。");
+      }));
+    } else {
+      notice(issueRecovery);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function createGrant(connections) {
   showDialog("签发 AI 授权");
   const form = node("form");
-  form.append(node("p", "仅选择完成当前任务所需的资源与工具，授权到期后令牌自动失效。", "form-context"));
+  form.append(node("p", "仅选择完成当前任务所需的资源与工具，授权到期后令牌自动失效。", "form-context"), node("p", issueRecovery, "field-help"));
   field(form, "client", "AI 客户端名称", {placeholder: "例如：项目维护助手"});
   const label = node("label", "连接");
   const select = node("select");
@@ -474,11 +530,8 @@ function createGrant(connections) {
     const resources = data.getAll("resource");
     const tools = data.getAll("tool");
     if (!client || !resources.length || !tools.length) throw new Error("请填写客户端名称，并至少选择一个资源和一个工具。");
-    const {token} = await api("/grants", "POST", {client, connection_id: select.value, resources, tools, ttl_seconds: Number(data.get("ttl"))});
-    if (isCurrent()) showToken(token);
-    else notice("授权已签发，但令牌窗口已取消；请撤销该授权并重新签发。");
-    void render();
-  });
+    await issueGrant("/grants", {client, connection_id: select.value, resources, tools, ttl_seconds: Number(data.get("ttl"))}, isCurrent);
+  }, {preventClose: true});
   dialogContent.append(form);
 }
 
@@ -502,14 +555,12 @@ function remaining(seconds) {
 
 function renewGrant(grant) {
   showDialog("重签发授权");
-  const form = node("form"); form.append(node("p", "旧令牌会立即拒绝新的调用，已接纳的操作可能继续完成。新令牌只显示一次。", "form-context"));
+  const form = node("form"); form.append(node("p", "旧令牌会立即拒绝新的调用，已接纳的操作可能继续完成。新令牌只显示一次。", "form-context"), node("p", issueRecovery, "field-help"));
   const ttl = node("select"); ttl.setAttribute("aria-label", "新的有效期"); ttl.name = "ttl";
   for (const [seconds, text] of [[900, "15 分钟"], [3600, "1 小时"], [28800, "8 小时"], [86400, "24 小时"]]) { const option = node("option", text); option.value = seconds; ttl.append(option); }
   const label = node("label", "新的有效期"); label.append(ttl); form.append(label);
   submitForm(form, "重签发并显示令牌", async (data, isCurrent) => {
-    const result = await api("/grants/" + encodeURIComponent(grant.id) + "/reissue", "POST", {ttl_seconds: Number(data.get("ttl"))});
-    if (isCurrent()) showToken(result.token); else notice("授权已重签发，但令牌窗口已取消。请重新重签发。");
-    void render();
+    await issueGrant("/grants/" + encodeURIComponent(grant.id) + "/reissue", {ttl_seconds: Number(data.get("ttl"))}, isCurrent);
   }, {preventClose: true});
   dialogContent.append(form);
 }

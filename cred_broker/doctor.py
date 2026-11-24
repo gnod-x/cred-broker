@@ -7,8 +7,12 @@ import stat
 from contextlib import closing
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
+
+from .backup_check import validate_records
 from .config import load_config
 from .origin import canonical_public_origin
+from .store import MasterKey
 
 
 def _check(label: str, ok: bool, detail: str) -> bool:
@@ -21,6 +25,8 @@ def _private_file(path: Path, expected_size: int | None = None) -> tuple[bool, s
         info = path.stat()
         if not stat.S_ISREG(info.st_mode):
             return False, "not a regular file"
+        if info.st_uid != os.geteuid():
+            return False, "must belong to the service user"
         if expected_size is not None and info.st_size != expected_size:
             return False, f"expected {expected_size} bytes"
         expected_mode = 0o400 if expected_size is not None else 0o600
@@ -46,6 +52,20 @@ def _database(path: Path) -> tuple[bool | None, str]:
         return (result is not None and result[0] == "ok", "SQLite quick_check passed" if result and result[0] == "ok" else "SQLite quick_check failed")
     except (OSError, sqlite3.Error, ValueError):
         return False, "cannot open database read-only"
+
+
+def _pairing(database: Path, key_path: Path) -> tuple[bool, str]:
+    """Only standalone snapshots reach this no-write immutable reader."""
+    try:
+        key = MasterKey.load(key_path)
+        uri = database.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
+            db.execute("PRAGMA trusted_schema=OFF")
+            counts = validate_records(db, key.aead())
+        return True, ("verified; all encrypted records authenticated" if any(counts.values())
+                      else "unproven; no encrypted records exist")
+    except (OSError, sqlite3.Error, ValueError, RuntimeError, InvalidTag):
+        return False, "key/database authentication or storage schema check failed"
 
 
 def _can_create(path: Path) -> bool:
@@ -94,6 +114,7 @@ def run() -> int:
         writable, detail = False, "cannot inspect data directory"
     failures += not _check("data directory", writable, detail)
 
+    key_ok = False
     if cfg.master_key_path.exists():
         key_ok, key_detail = _private_file(cfg.master_key_path, 32)
         failures += not _check("master key", key_ok, key_detail)
@@ -108,8 +129,12 @@ def run() -> int:
         db_ok, db_detail = _database(cfg.db_path)
         if db_ok is None:
             print("SKIP database integrity: " + db_detail)
+            print("SKIP key/database pair: live SQLite sidecars present; startup performs WAL-aware verification")
         else:
             failures += not _check("database", db_ok, db_detail)
+            if db_ok and key_ok:
+                pair_ok, pair_detail = _pairing(cfg.db_path, cfg.master_key_path)
+                failures += not _check("key/database pair", pair_ok, pair_detail)
     else:
         creatable = _can_create(cfg.db_path)
         failures += not _check("database", creatable,
@@ -118,6 +143,10 @@ def run() -> int:
     if cfg.db_path.exists() and not cfg.master_key_path.exists():
         failures += not _check("key/database pair", False,
                                "database exists but master key is missing; restore its matching key before starting")
+
+    if cfg.master_key_path.exists() and not cfg.db_path.exists():
+        failures += not _check("key/database pair", False,
+                               "partial installation: master key exists but database is missing; restore the matching pair")
 
     google = (os.environ.get("CB_GOOGLE_CLIENT_ID", ""),
               os.environ.get("CB_GOOGLE_CLIENT_SECRET", ""),

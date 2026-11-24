@@ -1,12 +1,13 @@
 """Stateless MCP Streamable HTTP transport."""
 import asyncio
 import json
-from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
 
 from fastapi.responses import JSONResponse
 from . import __version__
+from .control import OutcomeUnknown
+from .security import HttpBodyError, HttpSecurityPolicy, read_http_body
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 
@@ -16,25 +17,17 @@ def _error(code, message, ident=None, status=200):
                         status_code=status)
 
 
-def register_mcp(app, control):
+def register_mcp(app, control, security_policy=None):
+    policy = security_policy or HttpSecurityPolicy()
     @app.get("/mcp")
     def mcp_stream():
         return Response(status_code=405, headers={"Allow": "POST"})
 
     @app.post("/mcp")
     async def mcp(request: Request):
-        origin = request.headers.get("origin")
-        if origin is not None:
-            try:
-                parsed = urlsplit(origin)
-                allowed = (parsed.scheme in {"http", "https"}
-                           and parsed.netloc == request.headers.get("host")
-                           and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-                           and not (parsed.path or parsed.query or parsed.fragment or parsed.username))
-            except ValueError:
-                allowed = False
-            if not allowed:
-                raise HTTPException(403, "Origin denied")
+        denied = policy.validate(request.scope)
+        if denied is not None:
+            raise HTTPException(*denied)
         auth = request.headers.get("authorization", "").split()
         token = auth[1] if len(auth) == 2 and auth[0].lower() == "bearer" else ""
         grant = await asyncio.to_thread(control.resolve, token)
@@ -46,11 +39,10 @@ def register_mcp(app, control):
             return _error(-32600, "Unsupported protocol version", status=400)
         if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
             return _error(-32600, "JSON content required", status=415)
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > 65536:
-                return _error(-32600, "Request too large", status=413)
-            body.extend(chunk)
+        try:
+            body = await read_http_body(request.receive)
+        except HttpBodyError as exc:
+            return _error(-32600, exc.detail, status=exc.status_code)
         try:
             message = json.loads(body)
         except (ValueError, UnicodeError):
@@ -91,6 +83,18 @@ def register_mcp(app, control):
                 output = await asyncio.to_thread(control.call, token, name, resource, arguments)
             except PermissionError:
                 raise HTTPException(401, "Unauthorized", headers=unauthorized) from None
+            except OutcomeUnknown:
+                # Use a fixed public message, never the exception or provider output.
+                details = {
+                    "outcome": "outcome_unknown",
+                    "retryable": False,
+                    "message": (
+                        "The operation may have completed, but its outcome could not be recorded. "
+                        "Do not retry automatically. Verify the external operation before deciding what to do next."
+                    ),
+                }
+                result = {"content": [{"type": "text", "text": json.dumps(details)}],
+                          "structuredContent": details, "isError": True}
             except Exception:
                 result = {"content": [{"type": "text", "text": "Tool request denied or failed"}], "isError": True}
             else:

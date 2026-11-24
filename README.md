@@ -8,7 +8,7 @@
 
 ![v0.2.0 连接目录与服务授权入口](docs/images/console-v020.png)
 
-**v0.3.0 已发布公开镜像，并通过云端隔离验收。** 该版本加入运行诊断、连接最近测试状态、授权到期筛选与同范围重签发，并提供 MCP 接入配置、provider 能力描述、脱敏审计 CSV、本地 doctor、备份预检和短期管理会话。它也包含 v0.2.1 的 `CB_PUBLIC_ORIGIN` 反向代理来源校验修复。镜像摘要、升级步骤和测试范围见[版本说明](docs/releases/v0.3.0.md)和[验收记录](docs/validation.md)。
+**v0.3.1 是安全与正确性改造的第一批，范围为 T00–T03。** 本批加入已有库启动失败关闭、空库密钥配对 unproven、精确 Host/Origin 与实际请求体预算、本地业务和审计同事务，以及结果未知时不自动重试的流程。它没有完成整份 17 张任务卡，也没有把本机 LAN 切换为 HTTPS。候选制品、公开镜像与验收状态见[验收记录](docs/validation.md)，后续范围见[改造计划](docs/ai-refactor-plan-2026-11-25.md)。v0.3.0 的历史公开镜像与运维能力见[历史版本说明](docs/releases/v0.3.0.md)。
 
 ## 已实现
 
@@ -24,7 +24,7 @@
 
 ## 用 Docker Compose 部署
 
-需要 Docker Engine 和 Compose v2。Compose 配置固定公开镜像版本，支持 Linux amd64；运行时只访问所连接的上游服务。发布状态见 [验收记录](docs/validation.md)。
+需要 Docker Engine 和 Compose v2。Compose 固定目标镜像版本，发布流水线提供 Linux amd64；部署前先确认目标版本已在 [验收记录](docs/validation.md) 完成发布验收。未发布的候选版本只能先在隔离环境源码构建，不能把镜像名写入 Compose 当作已经发布。
 
 ```bash
 git clone https://github.com/gnod-x/cred-broker.git
@@ -43,9 +43,11 @@ docker compose ps
 ssh -N -L 8765:127.0.0.1:8765 your-user@your-server
 ```
 
-端口冲突时可在 `.env` 设置 `CB_HOST_PORT=18765`；这只改变宿主机回环端口，容器内部仍使用 8765。浏览器管理会话使用独立随机值，有效期 8 小时，退出或重启服务后失效；升级到本版本需重新登录。登录尝试按来源最多每分钟 8 次、实例合计每分钟 64 次，超限返回 `429` 与 `Retry-After`。反向代理后的用户可能共享来源额度；管理 API 仍可使用 `X-Admin-Token`。
+端口冲突时可在 `.env` 设置 `CB_HOST_PORT=18765`；容器内部仍使用 8765，同时必须在 `CB_ALLOWED_ORIGINS` 登记实际入口，例如 `["http://localhost:18765","http://127.0.0.1:18765"]`。修改环境后用 `docker compose up -d --force-recreate`，仅 restart 不会加载新的 Compose 环境。浏览器管理会话使用独立随机值，有效期 8 小时，退出或重启服务后失效；升级到本版本需重新登录。登录尝试按来源最多每分钟 8 次、实例合计每分钟 64 次，超限返回 `429` 与 `Retry-After`。反向代理后的用户可能共享来源额度；管理 API 仍可使用 `X-Admin-Token`。
 
-需要域名时，在可信 HTTPS 反向代理后部署，同时让代理访问内部端口。设置 `CB_PUBLIC_ORIGIN` 为精确的外部 origin（例如 `https://broker.example.com`），以保持管理写请求的同源校验和 Secure 会话 Cookie；不要无条件信任公网客户端传来的 `X-Forwarded-*`。管理员页面与 MCP 共用服务端口，使用不同认证。
+LAN 或域名入口必须在 `CB_ALLOWED_ORIGINS` 精确登记。Host 与可选 Origin 均按白名单校验；原生 MCP/API 可不带 Origin，但不能绕过 Host 或认证。默认上限为实际接收 65536 字节、整个请求体读取 10 秒；超限 413，到期 408，不等于 provider 动作的总期限。正式入口关闭 proxy_headers，不信任客户端伪造的 `X-Forwarded-*`。
+
+本机现有 LAN 管理地址为 `http://192.168.101.240:8765/admin`，MCP 和健康地址为同源 `/mcp`、`/healthz`；旧 Tailscale 入口保留，LAN 不以 Tailscale 为前提。本批未部署生产 TLS，HTTP 链路中的登录秘密、Cookie、Bearer 与结果仍有被同网段观察或篡改的风险。HTTPS 的名称、CA 信任与代理模板见 [LAN HTTPS ADR](docs/adr/0001-lan-https.md)。TLS 代理部署时把 `CB_PUBLIC_ORIGIN` 设为精确 HTTPS origin，Cookie 会强制 Secure；这会影响旧 HTTP 浏览器登录，须先安排切换，不可直接套用模板。
 
 镜像以 UID/GID 10001 运行，根文件系统只读、不挂载宿主机 home、Docker socket 或 SSH agent，数据存在命名 volume `broker-data`。镜像附带校验 SHA-512 后安装的官方 Instabox CLI；不会导入宿主机现有 Instabox 登录。
 
@@ -106,7 +108,7 @@ MCP 地址为 `http://localhost:8765/mcp`，认证头为 `Authorization: Bearer 
 
 管理台签发窗口会给出通用配置片段。片段只包含 MCP URL 和 `Bearer ${CRED_BROKER_TOKEN}` 占位符；不要把管理员令牌或实际网关令牌提交到仓库。当前仓库只验证标准 HTTP 请求和官方 MCP SDK 回环流程，不宣称已经兼容某个具体第三方客户端。
 
-管理员可在 `GET /admin/api/v1/ready` 查看版本、存储、主密钥和迁移状态。该接口需要管理员认证，不检查外部 provider，也不代表连接可用。连接目录中的“测试连接”是管理员显式触发的 provider 检查；结果只保存最近一次成功/失败时间和状态。
+管理员可在 `GET /admin/api/v1/ready` 查看版本、存储、已加载主密钥、`key_pairing` 和必需表/列状态。启动时扫描所有已有密文，配对为 verified 或 unproven；空库没有可供证明的密文，必须为 unproven。readiness 不在每次请求重新全库解密，也不检查外部 provider，不代表连接可用。连接目录中的“测试连接”是管理员显式触发的 provider 检查；结果只保存最近一次成功/失败时间和状态。
 
 集成方可用管理员认证的 `GET /admin/api/v1/providers/{provider}/schema` 获取连接表单和能力描述。返回值只包含非秘密 JSON Schema、OAuth/API key 认证模式、工具参数和资源约束；secret 字段仅描述字段名并标记 `writeOnly`，不会返回客户端 secret、私钥或 token。SSH 的资源以已创建连接的 `connection.resources` 为准，不能由通用正则推断主机范围。
 
@@ -117,11 +119,13 @@ docker compose exec cred-broker python -m cred_broker doctor
 # 源码运行：在已配置 CB_* 的同一环境执行 python -m cred_broker doctor
 ```
 
-doctor 会检查绑定地址、数据目录可写性、主密钥权限/长度、数据库权限、Google OAuth 配置是否齐全和管理员令牌长度；不会创建密钥、修改数据库、连接外部 provider 或打印秘密。独立 SQLite 数据库执行 `quick_check`；存在 WAL/SHM/journal 辅助文件时明确跳过完整性检查，提示对独立备份执行 `backup-check`。首次安装尚未生成数据库和主密钥时会明确提示将在首次启动初始化；有数据库却缺主密钥会报错，不能生成新密钥代替丢失密钥。
+doctor 检查本地配置、文件属主和 0400/0600 权限；不创建密钥、不外联、不打印秘密。无辅助文件的独立数据库执行 quick_check 和共享密文/JSON 配对检查；live WAL/SHM/journal 明确跳过完整性及配对检查，提示使用独立备份。key-only/db-only 部分安装均报错。正式启动还会进行 WAL 感知的只读预检，不依赖操作者先运行 doctor。
 
 「操作记录」页面支持按日期下载脱敏 CSV；接口为 `GET /admin/api/v1/audit/export.csv`，管理员认证后可用 `after`/`before` Unix 秒过滤，单次最多查询 31 天。导出仅含时间、客户端、动作、连接、资源和结果，不含工具参数、正文、secret 或 token。
 
 授权重签发使用 `POST /admin/api/v1/grants/{grant_id}/reissue`，可传 `{"ttl_seconds": 900}`。服务在一个事务中创建同范围的新 grant 并撤销旧 grant；新 token 只在该响应中出现一次，旧 token 立即不能用于新请求。
+
+创建连接、创建授权、撤销、断开和重签发的本地状态与审计同事务；审计写失败会回滚本地修改。远端操作无法与 SQLite 原子提交：若操作已接纳但结果或审计无法确认，返回 `outcome_unknown`、`retryable=false`；MCP 以 isError 工具结果表达。客户端不能自动重试。签发窗口在 pending 或令牌待保存时保护关闭；网络中断后先刷新清单，按客户端、连接、时间核对，再撤销或重签发，不能直接再签一次。
 
 下面是协议层示例，网关令牌由环境变量提供：
 
@@ -157,10 +161,15 @@ curl -sS http://localhost:8765/mcp \
 | `CB_DATA_DIR` | `/var/lib/cred-broker`，数据库和主密钥 |
 | `CB_BIND` | 源码运行 `127.0.0.1:8765`；容器内部 `0.0.0.0:8765` |
 | `CB_PUBLIC_ORIGIN` | 默认空；TLS 反向代理时设为精确的外部 origin，如 `https://broker.example.com` |
-| `CB_HOST_PORT` | Compose 宿主机回环端口，默认 8765 |
+| `CB_HOST_PORT` | Compose 宿主机回环端口，默认 8765；非默认端口需登记外部 origin |
+| `CB_ALLOWED_ORIGINS` | 默认 `[]`，JSON 数组中的精确 LAN/代理 HTTP(S) origin，无通配 |
+| `CB_MAX_REQUEST_BODY` | 默认 65536，允许 1024–65536，累计实际接收字节 |
+| `CB_BODY_READ_TIMEOUT` | 默认 10 秒，须大于 0 且不超过 60，整个请求体读取期限 |
 | `CB_GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI` | 三项同时配置才开启 Gmail OAuth |
 | `CB_INSTABOX_CLI` | `/usr/local/bin/instabox`，由管理员指定的可执行文件 |
 | `CB_ENABLE_LEGACY` | 默认 false，仅迁移时按需启用旧管理和旧 HTTP 调用 |
+
+启动只会在 key/db 均不存在时创建全新配对。已有数据库缺 key、短/错 key、坏密文、无效 JSON、缺表或坏权限会在监听前失败，不生成替代密钥，不修改 schema“修复”旧库。新安装私有暂存后无覆盖发布；中断残留 key-only/db-only 时保留文件并拒绝启动，需恢复原配对。正常只读 WAL 预检允许 SQLite 创建空辅助文件或更新 SHM 读者元数据，不执行业务写或 checkpoint。
 
 备份必须同时包含数据卷里的 `broker.db`、相关 WAL 状态和 `master.key`。最简单的方式是先 `docker compose stop`，再完整备份数据卷到加密存储，完成后 `docker compose start`。主密钥丢失后不能恢复凭证；数据库与主密钥一起泄露则可以解密，文件权限与主机隔离仍然必要。另行妥善保存 `.env`，不要提交到 Git。
 
@@ -190,6 +199,9 @@ python3 -m venv .venv
 .venv/bin/python -IB tests/test_doctor.py
 .venv/bin/python -IB tests/test_backup_check.py
 .venv/bin/python -IB tests/test_release_notes.py
+.venv/bin/python -IB tests/test_startup.py
+.venv/bin/python -IB tests/test_http_security.py
+.venv/bin/python -IB tests/test_release_regressions.py
 ```
 
 测试使用隔离数据库、假凭证与 mock upstream。SDK 测试启动临时回环 HTTP 服务器，通过官方 MCP Python 客户端完成握手、发现、调用和撤销验证。真实 Gmail、GitHub App 与 Instabox 账号授权需要部署者提供；mock 通过不代表那些账号已经连接。
@@ -204,7 +216,7 @@ export CB_DATA_DIR=/tmp/cred-broker-browser-fixture
 .venv/bin/python -B tests/test_browser.py
 ```
 
-浏览器 fixture 只能用作测试。CI 会执行功能、官方 SDK、浏览器与容器测试；推送版本 tag 后的容器发布任务依赖该版本的检查通过，再向当前仓库对应的 GHCR 地址发布 amd64 镜像。也可在 GitHub Actions 的 Container release 页面手动选择已有的 `vMAJOR.MINOR.PATCH` 标签补发；任务会核验实际检出的代码与该标签一致。
+浏览器 fixture 只能用作测试。CI 会执行功能、官方 SDK、浏览器与容器测试；发布时先构建一个候选镜像，以独立随机 Compose project 验收完全相同的 image ID，再发布并拉回 digest 重验。镜像内不写入自身最终 OCI digest；发布摘要保存在独立 artifact。也可在 GitHub Actions 的 Container release 页面手动选择已有的 `vMAJOR.MINOR.PATCH` 标签补发；任务会核验实际检出的代码与该标签一致。
 
 公开镜像验收后，把 `docs/releases/vMAJOR.MINOR.PATCH.md` 说明提交到 `main`。Release notes 流程核对版本标签和该标签触发的镜像流水线，确认成功后创建对应的 GitHub Release。正文相同的已有发布页会被直接复用。
 

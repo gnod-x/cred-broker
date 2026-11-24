@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, Request, Response
 from pydantic import BaseModel, StrictInt, ValidationError
 
 from . import providers
+from .control import OutcomeUnknown
 
 
 class ConnectionInput(BaseModel):
@@ -62,8 +63,10 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             raise HTTPException(400, "OAuth required")
         try:
             return {"connection": control.create_connection(**dict(data))}
-        except Exception:
+        except ValueError:
             raise HTTPException(400, "Invalid connection") from None
+        except Exception:
+            raise HTTPException(503, "Local change could not be confirmed; refresh state before retrying") from None
 
     @app.post(prefix + "/connections/{ident}/test", dependencies=admin)
     def test_connection(ident: str):
@@ -71,6 +74,9 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             return {"ok": True, "result": control.test_connection(ident)}
         except KeyError:
             raise HTTPException(404, "Connection unavailable") from None
+        except OutcomeUnknown:
+            return {"ok": False, "outcome": "outcome_unknown", "retryable": False,
+                    "result": "The connection test may have completed; do not retry automatically"}
         except Exception:
             return {"ok": False, "result": "Connection test failed"}
 
@@ -80,6 +86,8 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             control.disconnect(ident)
         except KeyError:
             raise HTTPException(404, "Connection unavailable") from None
+        except Exception:
+            raise HTTPException(503, "Local change could not be confirmed; refresh state before retrying") from None
         return Response(status_code=204)
 
     @app.get(prefix + "/grants", dependencies=admin)
@@ -99,6 +107,8 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             raise HTTPException(404, "Connection unavailable") from None
         except ValueError:
             raise HTTPException(400, "Invalid scope") from None
+        except Exception:
+            raise HTTPException(503, "Local change could not be confirmed; refresh state before retrying") from None
 
     @app.post(prefix + "/grants/{ident}/revoke", dependencies=admin)
     def revoke(ident: str):
@@ -106,6 +116,8 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             control.revoke(ident)
         except KeyError:
             raise HTTPException(404, "Grant unavailable") from None
+        except Exception:
+            raise HTTPException(503, "Local change could not be confirmed; refresh state before retrying") from None
         return {"ok": True}
 
     @app.post(prefix + "/grants/{ident}/reissue", dependencies=admin, status_code=201)
@@ -123,6 +135,8 @@ def register_control_api(app, control, require_admin, google_oauth_enabled=False
             raise HTTPException(409, "Grant revoked") from None
         except ValueError:
             raise HTTPException(400, "Invalid expiry or scope") from None
+        except Exception:
+            raise HTTPException(503, "Local change could not be confirmed; refresh state before retrying") from None
 
     @app.get(prefix + "/audit", dependencies=admin)
     def audit():

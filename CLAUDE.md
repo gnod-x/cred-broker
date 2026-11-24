@@ -2,9 +2,21 @@
 
 ## 来源与入口
 
-开源源码位于 `/home/dong/projects/cred-broker`，是新的单实例授权中心。历史生产服务 `/opt/cred-broker` 与 `cred-broker.service` 独立存在；只修改源码仓库不会升级生产服务。未经部署任务授权，不把开发源码覆盖到历史生产目录，不复制其数据库、主密钥、环境文件或现有登录到云端。
+开发源码和本机运行目录分开维护。`dong-server` 的 `cred-broker.service` 用 systemd drop-in 选择 `/opt/cred-broker-releases/` 下的版本目录；当前运行 v0.3.0，仅监听 `127.0.0.1:8765`。原 v0.1.0 安装 `/opt/cred-broker` 用于回滚。更新开发源码不会更新运行实例；部署和回滚见本机 `~/.agent-context/verification/cred-broker-local-2026-11-21.md`。生产数据库、主密钥、环境文件和管理员登录均留在本机。
 
 部署默认使用 `compose.yaml`；Python 入口为 `python -m cred_broker`。管理台 `/admin`、管理 API `/admin/api/v1`、标准 MCP `POST /mcp`、存活检查 `/healthz`。契约详细行为见 [README](README.md)、[架构](docs/architecture.md)、[安全边界](docs/security.md)。
+
+2026-11-25 按用户要求提供局域网入口：管理页为 `http://192.168.101.240:8765/admin`，MCP 为同源 `/mcp`，健康检查为同源 `/healthz`；家庭局域网设备无需连接 Tailscale，仍须通过原管理令牌或 MCP Bearer 鉴权。为兼容已有入口，原 Tailscale 地址 `100.127.124.36:8765` 同时保留。`cred-broker-tailnet.socket` 沿用原单元名，显式监听上述两个地址，由固定目标的 `systemd-socket-proxyd` 转发到 `127.0.0.1:8765`，不改变 broker 本体回环绑定。本机部署来源为 [socket](deploy/cred-broker-tailnet.socket) 与 [proxy service](deploy/cred-broker-tailnet.service)，代理使用独立 DynamicUser、32 MiB 内存和 16 个任务上限。不监听 `0.0.0.0`，未新增公网域名、Funnel 或 Tailscale Serve。当前拓扑、登录验收与回滚见上述本机部署说明。
+
+## v0.3.1 第一批实现范围
+
+本次代码实现计划 T00–T03：隔离基线、已有库启动失败关闭、HTTP 入口/实际接收预算、本地状态与审计同事务及结果未知流程；不代表 17 张任务卡全部完成。候选代码与真实生产分开，生产仍是上述 v0.3.0/LAN HTTP 拓扑；本轮未部署生产 TLS。最终候选与发布证据见 [验收记录](docs/validation.md)，后续任务见 [改造计划](docs/ai-refactor-plan-2026-11-25.md)。
+
+正式入口必须经 startup.prepare_store；已有库缺 key/短 key 在打开 SQLite 前失败，错 key/坏密文/JSON/缺表列/坏权限失败关闭，不造替代 key、不修旧库。检查全部 legacy/scoped 记录，保持 32 字节二进制 key、nonce/AAD 不变。空库 key_pairing=unproven；ready 区分已加载 key、配对、storage 与必需表/列状态，不逐请求遍历解密全库。新安装私有暂存、fsync、无覆盖发布并串行化初始化；中断部分安装需恢复原配对。live WAL 使用正常只读连接，不用 immutable；容许空 sidecar/SHM 读者元数据，不做业务写/checkpoint。
+
+web/MCP 共用精确 Host/Origin 策略和最外层实际字节/总读取期限。外部 LAN、代理与非默认映射端口须登记 CB_ALLOWED_ORIGINS；可选 CB_PUBLIC_ORIGIN 强制 HTTPS Secure Cookie。默认读取 65536 字节/10秒，可配置范围 1024–65536、>0且<=60秒。超限413、超时408。正式 Python 入口关闭 proxy_headers；TCP代理丢失客户端地址，不宣称逐设备限流。TLS名称、CA信任与生产切换仍需决策，见 [ADR](docs/adr/0001-lan-https.md)。
+
+本地连接/授权/撤销/断开/重签发和审计同事务。远端动作与SQLite不原子：结果无法记录时 outcome_unknown、retryable=false，MCP isError；不得自动重试或承诺exactly-once。一次性token丢失先刷新核对清单，再撤销/重签发。
 
 ## 必须保留
 
@@ -25,8 +37,10 @@
 
 ## 验证与文档
 
-逻辑改动运行 `tests/test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`；认证与运维检查另跑 `test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`；SSH 变更加真实回环传输 `test_ssh_transport.py`，MCP 变更加官方 `test_mcp_sdk.py`，网页变更加 fixture 专用 `test_browser.py`。依赖在 requirements[-dev].txt。完整命令见 README。
+逻辑改动运行 `tests/test_core.py`、`test_control.py`、`test_providers.py`、`test_google.py`、`test_app.py`；认证与运维检查另跑 `test_admin_auth.py`、`test_doctor.py`、`test_backup_check.py`；SSH 变更加真实回环传输 `test_ssh_transport.py`，MCP 变更加官方 `test_mcp_sdk.py`，网页变更加 fixture 专用 `test_browser.py`。依赖在 requirements[-dev].txt。新增存储/入口/发布回归另跑 test_startup.py、test_http_security.py、test_release_regressions.py。所有脚本以隔离 Python 模式 .venv/bin/python -IB 执行；完整命令见 README。
 
 测试只用临时数据库、假凭证和独立回环服务器；不连接用户真实 Gmail/仓库/SSH/Instabox 资源。真实账号验收需用户自行建立连接，报告必须区分 mock、协议联调和真实上游验证。
 
 发布前在隔离云测试环境完成完整测试、Compose 容器启动与重启后状态恢复、secret 不落明文及回滚材料核验；文档须按最终实现重写。不要发布未通过的版本或把本机生产服务当测试对象。构建产物、临时归档和废弃测试数据需清理，保留仍需运行的测试环境与验收材料。
+
+发布采用同一候选镜像 image ID 的隔离Compose验收，再推送并拉取digest复验；镜像不内嵌自身最终OCI digest。清理只限本次唯一随机project及其已核验资源，禁止全局prune。生产TLS、面板入口或真实provider验证未执行时不得写成已完成。

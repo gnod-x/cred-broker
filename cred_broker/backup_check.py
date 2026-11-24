@@ -29,6 +29,39 @@ def _invalid_constant(_value):
     raise ValueError("Invalid JSON constant")
 
 
+class StorageValidationError(ValueError):
+    """A sanitized storage validation failure."""
+
+
+def validate_records(db: sqlite3.Connection, cipher: AESGCM) -> dict[str, int]:
+    """Validate every encrypted record without changing schema or journal mode."""
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    required = dict(LEGACY_COLUMNS)
+    if tables.intersection(SCOPED_COLUMNS):
+        required.update(SCOPED_COLUMNS)
+    for table, expected in required.items():
+        columns = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
+        if table not in tables or not expected <= columns:
+            raise StorageValidationError("数据库业务表或必需列不完整。请使用完整备份。")
+    counts = {"legacy": 0, "scoped": 0}
+    queries = {"legacy": "SELECT name, nonce, ciphertext FROM credentials"}
+    if "scoped_connections" in tables:
+        queries["scoped"] = "SELECT id, nonce, ciphertext FROM scoped_connections"
+    for kind, query in queries.items():
+        for ident, nonce, ciphertext in db.execute(query):
+            if (not isinstance(ident, str) or not isinstance(nonce, bytes)
+                    or len(nonce) != 12 or not isinstance(ciphertext, bytes)):
+                raise StorageValidationError("发现不符合格式的加密记录。")
+            payload = json.loads(cipher.decrypt(nonce, ciphertext, ident.encode()),
+                                 parse_constant=_invalid_constant)
+            if not isinstance(payload, dict) or (kind == "scoped" and not all(
+                    isinstance(payload.get(field), dict) for field in ("settings", "secret"))):
+                raise StorageValidationError("加密记录内容结构无效。请检查备份。")
+            counts[kind] += 1
+    return counts
+
+
 def run(args: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m cred_broker backup-check")
     parser.add_argument("--db", required=True, type=Path)
@@ -62,31 +95,9 @@ def run(args: list[str]) -> int:
             db.execute("PRAGMA trusted_schema=OFF")
             if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 return fail("SQLite 完整性检查失败。请使用另一份备份。")
-            tables = {row[0] for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )}
-            required = dict(LEGACY_COLUMNS)
-            if tables.intersection(SCOPED_COLUMNS):
-                required.update(SCOPED_COLUMNS)
-            for table, expected in required.items():
-                columns = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
-                if table not in tables or not expected <= columns:
-                    return fail("数据库业务表或必需列不完整。请使用完整备份。")
-            queries = {"legacy": "SELECT name, nonce, ciphertext FROM credentials"}
-            if "scoped_connections" in tables:
-                queries["scoped"] = "SELECT id, nonce, ciphertext FROM scoped_connections"
-            for kind, query in queries.items():
-                for ident, nonce, ciphertext in db.execute(query):
-                    if not isinstance(ident, str) or not isinstance(nonce, bytes) or len(nonce) != 12:
-                        return fail("发现不符合格式的加密记录。")
-                    if not isinstance(ciphertext, bytes):
-                        return fail("发现不符合格式的加密记录。")
-                    payload = json.loads(cipher.decrypt(nonce, ciphertext, ident.encode()),
-                                         parse_constant=_invalid_constant)
-                    if not isinstance(payload, dict) or (kind == "scoped" and not all(
-                            isinstance(payload.get(field), dict) for field in ("settings", "secret"))):
-                        return fail("加密记录内容结构无效。请检查备份。")
-                    counts[kind] += 1
+            counts = validate_records(db, cipher)
+    except StorageValidationError as exc:
+        return fail(str(exc))
     except InvalidTag:
         return fail("加密记录校验失败。主密钥可能不匹配，或记录已损坏。")
     except (OSError, sqlite3.Error, ValueError):

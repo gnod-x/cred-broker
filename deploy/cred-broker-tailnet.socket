@@ -1,0 +1,14 @@
+[Unit]
+Description=Cred Broker LAN and Tailscale address listeners
+Wants=tailscaled.service
+After=tailscaled.service
+
+[Socket]
+ListenStream=192.168.101.240:8765
+ListenStream=100.127.124.36:8765
+FreeBind=yes
+NoDelay=yes
+Backlog=128
+
+[Install]
+WantedBy=sockets.target

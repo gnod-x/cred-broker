@@ -171,8 +171,35 @@ def run():
         popup.locator("input[name='resource']").first.check()
         popup.locator("input[name='tool']").first.check()
         popup.get_by_label("有效期").select_option("900")
+        # Hold the first POST to inspect real pending state without issuing twice.
+        held_issues = []
+        def hold_first_issue(route):
+            if route.request.method == "POST":
+                held_issues.append(route)
+            else:
+                route.continue_()
+        page.route("**/admin/api/v1/grants", hold_first_issue)
         popup.get_by_role("button", name="签发令牌").click()
+        expect(popup).to_have_attribute("data-issue-state", "pending")
+        expect(popup.get_by_role("button", name="正在处理…")).to_be_disabled()
+        expect(popup.get_by_role("button", name="取消", exact=True)).to_be_disabled()
+        expect(popup.get_by_role("button", name="关闭窗口")).to_be_disabled()
+        page.keyboard.press("Escape")
+        expect(popup).to_be_visible()
+        popup.locator("form").evaluate("(form) => form.requestSubmit()")
+        assert len(held_issues) == 1, "Pending form admitted a duplicate issue request"
+        assert not page.evaluate("""() => {
+          const event = new Event('beforeunload', {cancelable: true});
+          return window.dispatchEvent(event);
+        }"""), "Pending issuance must warn before reload/unload"
+        page.evaluate("location.hash = '#audit'")
+        expect(page.locator("#title")).to_have_text("操作记录")
+        expect(page.locator("#content")).to_have_attribute("aria-busy", "false")
+        expect(popup).to_have_attribute("data-issue-state", "pending")
+        held_issues[0].continue_()
         expect(popup.get_by_role("heading", name="网关令牌已签发")).to_be_visible()
+        expect(popup).to_have_attribute("data-issue-state", "success")
+        page.unroute("**/admin/api/v1/grants", hold_first_issue)
         gateway_token = popup.get_by_label("网关令牌", exact=True).input_value()
         assert gateway_token and gateway_token != TOKEN
         popup.get_by_role("button", name="复制令牌").click()
@@ -183,6 +210,9 @@ def run():
         assert gateway_token not in page.content()
         grants = context.request.get(BASE_URL + "/admin/api/v1/grants").json()
         assert gateway_token not in str(grants), "Grant GET must not return token"
+        page.evaluate("location.hash = '#grants'")
+        expect(page.locator("#title")).to_have_text("AI 授权")
+        expect(page.locator("#content")).to_have_attribute("aria-busy", "false")
         grant = page.get_by_role("article").filter(has=page.get_by_role("heading", name=client_label, exact=True))
         grant_search = page.get_by_role("searchbox", name="搜索授权")
         grant_search.fill(client_label)
@@ -214,6 +244,114 @@ def run():
         expect(revoked_grants.filter(has_text="已撤销")).to_have_count(2)
         final_grants = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
         assert all(item["revoked_at"] is not None for item in final_grants if item["client"] == client_label)
+
+        # Commit a real fixture mutation, then discard/truncate its one-time reply.
+        # Recovery must list/revoke/reissue; it must never retry a POST or recover a token.
+        lost_client = "lost-reply-fixture-" + uuid.uuid4().hex[:8]
+        discarded_replies = []
+        def discard_issue_reply(route):
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            response = route.fetch()
+            assert response.status == 201
+            discarded_replies.append(route.request.url)
+            route.fulfill(status=200, content_type="application/json", body="{")
+        page.route("**/admin/api/v1/grants", discard_issue_reply)
+        page.get_by_role("button", name="新建授权").click()
+        popup.get_by_label("AI 客户端名称").fill(lost_client)
+        popup.get_by_label("连接", exact=True).select_option(label=connection_label)
+        expect(popup).to_contain_text("若网络中断、刷新或关闭页面后未拿到令牌")
+        popup.locator("input[name='resource']").first.check()
+        popup.locator("input[name='tool']").first.check()
+        popup.get_by_role("button", name="签发令牌").click()
+        expect(popup.get_by_role("heading", name="授权签发结果待确认")).to_be_visible()
+        expect(popup).to_have_attribute("data-issue-state", "unknown")
+        expect(popup).to_contain_text("不会自动重试")
+        expect(popup.get_by_label("网关令牌", exact=True)).to_have_count(0)
+        expect(popup.get_by_role("button", name="签发令牌", exact=True)).to_have_count(0)
+        expect(popup.get_by_role("button", name="关闭窗口")).to_be_enabled()
+        assert len(discarded_replies) == 1
+        after_loss = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert sum(item["client"] == lost_client for item in after_loss) == 1
+        assert all("token" not in item for item in after_loss)
+        page.unroute("**/admin/api/v1/grants", discard_issue_reply)
+        popup.get_by_role("button", name="刷新授权列表").click()
+        expect(popup).not_to_be_visible()
+        lost_grant = page.get_by_role("article").filter(
+            has=page.get_by_role("heading", name=lost_client, exact=True))
+        expect(lost_grant).to_have_count(1)
+        page.reload()
+        expect(page.locator("#content")).to_have_attribute("aria-busy", "false")
+        expect(lost_grant).to_have_count(1)
+        expect(page.get_by_label("网关令牌", exact=True)).to_have_count(0)
+        page.route("**/admin/api/v1/grants/*/reissue", discard_issue_reply)
+        lost_grant.get_by_role("button", name="重签发", exact=True).click()
+        popup.get_by_role("button", name="重签发并显示令牌").click()
+        expect(popup.get_by_role("heading", name="授权签发结果待确认")).to_be_visible()
+        expect(popup).to_have_attribute("data-issue-state", "unknown")
+        assert len(discarded_replies) == 2
+        page.unroute("**/admin/api/v1/grants/*/reissue", discard_issue_reply)
+        after_reissue_loss = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert sum(item["client"] == lost_client for item in after_reissue_loss) == 2
+        assert sum(item["client"] == lost_client and item["revoked_at"] is None for item in after_reissue_loss) == 1
+        popup.get_by_role("button", name="刷新授权列表").click()
+        active_lost = page.get_by_role("article").filter(
+            has=page.get_by_role("heading", name=lost_client, exact=True)).filter(
+            has=page.get_by_role("button", name="撤销授权", exact=True))
+        active_lost.get_by_role("button", name="撤销授权", exact=True).click()
+        popup.get_by_role("button", name="确认", exact=True).click()
+        expect(popup).not_to_be_visible()
+        cleaned_loss = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert all(item["revoked_at"] is not None for item in cleaned_loss if item["client"] == lost_client)
+        assert not page.evaluate("() => JSON.stringify({...localStorage,...sessionStorage}).includes('cb_')")
+
+        # Exercise the actual AbortController timeout path without a 30-second sleep.
+        # The synthetic fetch never contacts the fixture and rejects only on abort.
+        timeout_client = "timeout-fixture-" + uuid.uuid4().hex[:8]
+        page.evaluate("""() => {
+          window.fixtureOriginalFetch = window.fetch;
+          window.fixtureOriginalSetTimeout = window.setTimeout;
+          window.fixtureTimeoutPosts = 0;
+          window.fixtureIssueTimeout = null;
+          window.setTimeout = (callback, delay, ...args) => {
+            if (delay === 30000) {
+              window.fixtureIssueTimeout = callback;
+              return window.fixtureOriginalSetTimeout(() => {}, 600000);
+            }
+            return window.fixtureOriginalSetTimeout(callback, delay, ...args);
+          };
+          window.fetch = (input, options = {}) => {
+            if (String(input).endsWith('/admin/api/v1/grants') && options.method === 'POST') {
+              window.fixtureTimeoutPosts++;
+              return new Promise((_resolve, reject) => options.signal.addEventListener(
+                'abort', () => reject(new DOMException('Aborted', 'AbortError')), {once: true}));
+            }
+            return window.fixtureOriginalFetch(input, options);
+          };
+        }""")
+        page.get_by_role("button", name="新建授权").click()
+        popup.get_by_label("AI 客户端名称").fill(timeout_client)
+        popup.get_by_label("连接", exact=True).select_option(label=connection_label)
+        popup.locator("input[name='resource']").first.check()
+        popup.locator("input[name='tool']").first.check()
+        popup.get_by_role("button", name="签发令牌").click()
+        expect(popup).to_have_attribute("data-issue-state", "pending")
+        page.evaluate("window.fixtureIssueTimeout()")
+        expect(popup.get_by_role("heading", name="授权签发结果待确认")).to_be_visible()
+        expect(popup).to_have_attribute("data-issue-state", "unknown")
+        assert page.evaluate("window.fixtureTimeoutPosts") == 1
+        page.evaluate("""() => {
+          window.fetch = window.fixtureOriginalFetch;
+          window.setTimeout = window.fixtureOriginalSetTimeout;
+          delete window.fixtureOriginalFetch; delete window.fixtureOriginalSetTimeout;
+          delete window.fixtureIssueTimeout;
+        }""")
+        timeout_grants = context.request.get(BASE_URL + "/admin/api/v1/grants").json()["grants"]
+        assert not any(item["client"] == timeout_client for item in timeout_grants)
+        popup.get_by_role("button", name="刷新授权列表").click()
+        expect(popup).not_to_be_visible()
+
         page.locator("nav a[href='#connections']").click()
         connected.get_by_role("button", name="删除连接").click()
         popup.get_by_role("button", name="确认", exact=True).click()
@@ -226,7 +364,8 @@ def run():
         expect(malicious).to_have_count(0)
 
         page.locator("nav a[href='#audit']").click()
-        expect(page.get_by_role("cell", name="重签发授权", exact=True)).to_be_visible()
+        expect(page.get_by_role("cell", name="重签发授权", exact=True)).to_have_count(2)
+        expect(page.get_by_role("cell", name="重签发授权", exact=True).first).to_be_visible()
         expect(page.locator("#notice")).to_be_hidden(timeout=7000)
         page.emulate_media(reduced_motion="reduce")
         for width in (375, 768, 1024, 1440):

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cred_broker.doctor import run
+from cred_broker.store import MasterKey, Store
 
 
 class DoctorTest(unittest.TestCase):
@@ -37,8 +38,9 @@ class DoctorTest(unittest.TestCase):
             key, db_path = root / "master.key", root / "broker.db"
             key.write_bytes(b"k" * 32)
             key.chmod(0o400)
-            with sqlite3.connect(db_path) as db:
-                db.execute("CREATE TABLE fixture (id INTEGER)")
+            Store(MasterKey(key), db_path)
+            with contextlib.closing(sqlite3.connect(db_path)) as db:
+                db.execute("PRAGMA journal_mode=DELETE")
             db_path.chmod(0o600)
             before = {path.name: path.read_bytes() for path in root.iterdir()}
             result, output = self.check(root)
@@ -69,6 +71,7 @@ class DoctorTest(unittest.TestCase):
             key, database = root / "master.key", root / "broker.db"
             key.write_bytes(b"k" * 32)
             key.chmod(0o400)
+            Store(MasterKey(key), database)
             with contextlib.closing(sqlite3.connect(database)) as db:
                 db.execute("PRAGMA journal_mode=WAL")
                 db.execute("CREATE TABLE fixture (id INTEGER)")
@@ -86,6 +89,43 @@ class DoctorTest(unittest.TestCase):
                 self.assertEqual(result, 0, output)
                 self.assertIn("SKIP database integrity", output)
                 self.assertEqual(before, {path.name: path.read_bytes() for path in root.iterdir()})
+
+    def test_pairing_and_partial_schema_fail_without_modifying_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            key_path, database = root / "master.key", root / "broker.db"
+            store = Store(MasterKey(key_path), database)
+            store.put_credential("fixture", "api_key", {"key": "synthetic-secret"})
+            with contextlib.closing(sqlite3.connect(database)) as db:
+                db.execute("PRAGMA journal_mode=DELETE")
+            code, output = self.check(root)
+            self.assertEqual(code, 0, output)
+            self.assertIn("verified", output)
+            key_path.chmod(0o600)
+            key_path.write_bytes(b"wrong-key".ljust(32, b"!"))
+            key_path.chmod(0o400)
+            before = {p.name: p.read_bytes() for p in root.iterdir()}
+            code, output = self.check(root)
+            self.assertEqual(code, 1, output)
+            self.assertNotIn("synthetic-secret", output)
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
+            database.unlink()
+            code, output = self.check(root)
+            self.assertEqual(code, 1, output)
+            self.assertIn("partial installation", output)
+
+    def test_empty_pair_is_unproven_and_unknown_schema_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            Store(MasterKey(root / "master.key"), root / "broker.db")
+            with contextlib.closing(sqlite3.connect(root / "broker.db")) as db:
+                db.execute("PRAGMA journal_mode=DELETE")
+            code, output = self.check(root)
+            self.assertEqual(code, 0, output)
+            self.assertIn("unproven", output)
+            with contextlib.closing(sqlite3.connect(root / "broker.db")) as db, db:
+                db.execute("DROP TABLE grants")
+            self.assertEqual(self.check(root)[0], 1)
 
 
 if __name__ == "__main__":

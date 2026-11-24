@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 from contextlib import closing
@@ -88,22 +89,39 @@ def _redact(obj: Any) -> Any:
 
 
 class MasterKey:
-    """读取或初始化主密钥。首次运行生成 32 字节随机密钥。"""
+    """Read a binary key; production startup uses load() or staged creation."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, create: bool = True):
         self.path = path
-        if path.exists():
-            raw = path.read_bytes()
-            if len(raw) != 32:
-                raise RuntimeError(f"主密钥长度异常: {path}")
-            self._key = raw
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            key = secrets.token_bytes(32)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        if not path.exists() and create:
+            self._create(path)
+        with path.open("rb") as fh:
+            raw = fh.read(33)
+        if len(raw) != 32:
+            raise RuntimeError("主密钥必须恰好为 32 字节")
+        self._key = raw
+
+    @classmethod
+    def load(cls, path: Path) -> "MasterKey":
+        """Load only: never replace a missing or invalid key."""
+        return cls(path, create=False)
+
+    @staticmethod
+    def _create(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".master-key-", dir=path.parent)
+        try:
             with os.fdopen(fd, "wb") as fh:
-                fh.write(key)
-            self._key = key
+                os.fchmod(fh.fileno(), 0o400)
+                fh.write(secrets.token_bytes(32))
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
 
     def aead(self) -> AESGCM:
         return AESGCM(self._key)
@@ -121,11 +139,13 @@ class Session:
 
 
 class Store:
-    def __init__(self, key: MasterKey, db_path: Path):
+    def __init__(self, key: MasterKey, db_path: Path, *, initialize: bool = True):
         self.key = key
         self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init()
+        self.pairing_status = "unproven"
+        if initialize:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -137,10 +157,7 @@ class Store:
     def _init(self) -> None:
         with closing(self._conn()) as conn, conn:
             conn.executescript(SCHEMA)
-        try:
-            os.chmod(self.db_path, 0o600)
-        except OSError:
-            pass
+        os.chmod(self.db_path, 0o600)
 
     # ---------- 凭证 ----------
 

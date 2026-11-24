@@ -32,12 +32,12 @@
       <form method="post" action="/login">
         <label for="admin-token">管理令牌</label>
         <input id="admin-token" name="token" type="password" placeholder="输入你的管理令牌" required autocomplete="current-password" aria-describedby="token-help">
-        <p id="token-help" class="field-help">使用部署时设置的管理令牌。</p>
+        <p id="token-help" class="field-help">这是部署者设置的管理员登录凭证，不是给 AI 的短期授权令牌。</p>
         <button type="submit">登录<svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#arrow"></use></svg></button>
       </form>
-      <div class="login-help"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#book"></use></svg><span>首次部署？<a href="https://github.com/gnod-x/cred-broker#用-docker-compose-部署" target="_blank" rel="noopener noreferrer">查看部署说明</a></span></div>
+      <div class="login-help"><svg class="ui-icon" aria-hidden="true"><use href="/static/ui-icons.svg#book"></use></svg><span>不知道令牌来源？<a href="https://github.com/gnod-x/cred-broker#用-docker-compose-部署" target="_blank" rel="noopener noreferrer">查看部署说明</a></span></div>
     </section>
   </main>
-  <footer class="login-footer"><span>开源、自托管的 AI 工具授权中心</span><span>v0.3.0</span></footer>
+  <footer class="login-footer"><span>开源、自托管的 AI 工具授权中心</span><span>v{{ version }}</span></footer>
 </body>
 </html>

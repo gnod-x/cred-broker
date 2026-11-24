@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from .origin import canonical_origin
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -35,12 +38,32 @@ class Config:
     ssh_known_hosts: Path | None
     legacy_enabled: bool = False
     public_origin: str = ""
+    allowed_origins: tuple[str, ...] = ()
+    body_read_timeout: float = 10.0
+    max_request_body_bytes: int = 65536
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _http_settings():
+    from .security import validate_read_limits
+
+    try:
+        values = json.loads(os.environ.get("CB_ALLOWED_ORIGINS", "[]"))
+        if not isinstance(values, list) or len(values) > 32 or not all(isinstance(value, str) for value in values):
+            raise ValueError
+        origins = tuple(dict.fromkeys(canonical_origin(value) for value in values))
+        timeout = float(os.environ.get("CB_BODY_READ_TIMEOUT", "10"))
+        maximum = int(os.environ.get("CB_MAX_REQUEST_BODY", "65536"))
+    except (TypeError, ValueError):
+        raise RuntimeError("Invalid HTTP ingress/read configuration") from None
+    validate_read_limits(maximum, timeout)
+    return origins, timeout, maximum
+
+
 def load_config() -> Config:
+    origins, body_read_timeout, max_request_body_bytes = _http_settings()
     data_dir = Path(_env("CB_DATA_DIR", "/var/lib/cred-broker"))
     kh = os.environ.get("CB_SSH_KNOWN_HOSTS")
     return Config(
@@ -59,4 +82,7 @@ def load_config() -> Config:
         ssh_known_hosts=Path(kh) if kh else None,
         legacy_enabled=os.environ.get("CB_ENABLE_LEGACY", "").lower() == "true",
         public_origin=os.environ.get("CB_PUBLIC_ORIGIN", ""),
+        allowed_origins=origins,
+        body_read_timeout=body_read_timeout,
+        max_request_body_bytes=max_request_body_bytes,
     )

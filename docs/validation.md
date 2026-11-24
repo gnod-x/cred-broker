@@ -1,5 +1,42 @@
 # 验收记录
 
+
+## v0.3.1 · 第一批 T00–T03 候选验收
+
+日期：2026-11-25。环境为云机器 three 的隔离目录 /data/workspace/cred-broker-refactor-20261125；只使用合成凭证、临时库、mock provider、独立回环 HTTP/TLS 和专用 Compose 项目。本机生产目录、真实数据库/主密钥、账号授权与既有 LAN/Tailscale 拓扑未作为测试对象。
+
+本节记录主 agent 汇总的候选证据；公开 tag、GitHub CI、GHCR 推送与公开 digest 的结果须在实际执行后补充，不能从候选通过推断已发布。以下为第一批范围，不代表整份 17 卡路线完成。
+
+| 验证 | 候选结果 | 范围和限制 |
+| --- | --- | --- |
+| Python 回归 | 通过 | 14 个脚本以 .venv/bin/python -IB 运行；脚本清单见下，不累计或推测未提供的 unittest 总数 |
+| T01 启动与配对 | 通过 | 新安装、缺/短/错 key、坏 legacy/scoped 密文与 JSON、部分安装、权限、并发无覆盖、中断发布、live WAL最新记录；空库unproven |
+| T02 HTTP 入口与接收 | 通过 | 精确 Host/Origin、伪造转发头、实际请求体累计与读取期限；隔离真实回环/原样TCP代理，不修改生产入口 |
+| T03 本地事务与未知结果 | 通过 | 本地状态/审计同事务、故障回滚、一次性token窗口、OutcomeUnknown与MCP结构化不重试提示；不保证远端exactly-once |
+| Chromium | 通过 | 完整fixture流程，11张截图；fixture已清理，未使用真实账号 |
+| 同一候选Compose镜像 | 通过 | verify_release_image.py验收下列准确image ID，含加固、doctor、加密、SQLite备份、原备份token经HTTP恢复/调用/撤销、重启持久性；合成provider |
+| 隔离TLS fixture | 通过 | 13项检查，使用指定cafile及主机名校验，未全局跳过TLS验证；这不是生产TLS启用或ADR代理模板已部署的证据 |
+| 公开tag / CI / GHCR | 待发布步骤 | 尚未在本节录入公开运行记录与registry digest；须由发布者核验后补充 |
+
+候选镜像 image ID：
+
+```text
+sha256:95af0e9e67d1ba2c5cede9bdffcec288a49aef5ff49142e6c13a0dc4fb0548bc
+```
+
+它是本地候选镜像的配置/内容标识，不是可用于公开registry拉取的manifest digest。发布流水线应先验证该次构建的准确候选，推送后拉回固定digest并核对image ID，再执行隔离验收。镜像内不能包含其自身最终OCI digest。
+
+14个脚本：test_core.py、test_control.py、test_providers.py、test_google.py、test_app.py、test_ssh_transport.py、test_mcp_sdk.py、test_admin_auth.py、test_doctor.py、test_backup_check.py、test_release_notes.py、test_startup.py、test_http_security.py、test_release_regressions.py。浏览器和容器脚本另列，不重复计入。
+
+本批保留的边界：
+
+- 本机仍使用此前HTTP LAN入口，LAN设备无需Tailscale；链路TLS风险仍在，[HTTPS ADR](adr/0001-lan-https.md)未执行生产切换。
+- 启动只读WAL检查可以触及SHM读者元数据或创建空辅助文件；独立backup-check才承诺无sidecar输入的immutable检查。
+- key_pairing=unproven是空库无法证明配对，不应改写成verified；schema current不是已实现正式schema/key版本。
+- 入口读取期限不等于整个provider动作deadline；全局准入、输出预算与其他T04–T14任务仍延期。
+- 合成恢复与TLS回环不证明真实Gmail/GitHub/SSH/Instabox账号、DNS/CA生产信任或特定第三方客户端已验收。
+
+
 ## v0.2.1 · TLS 反向代理登录修复
 
 日期：2026-11-21。修复 HTTPS 反向代理把请求转发为内部 HTTP 后，管理登录 POST 因外部 `Origin` 与应用内部来源不同而返回 403 的问题。新增 `CB_PUBLIC_ORIGIN` 精确配置；管理写请求规范化比较配置来源与内部来源，不依赖任意 `X-Forwarded-*`。外部 HTTPS 配置下登录与注销 Cookie 保持 Secure。

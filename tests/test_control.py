@@ -2,6 +2,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -219,6 +220,153 @@ class ScopedMcpTest(unittest.TestCase):
             self.assertNotIn("synthetic-fake-secret", str(control.audit()))
             self.assertTrue(all(set(row) == {"ts", "client", "action", "connection_id", "resource", "outcome"}
                                 for row in admin_events))
+
+
+class T03TransactionTests(unittest.TestCase):
+    """Only synthetic providers and disposable SQLite databases are used."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.control = control_module.Control(Store(MasterKey(root / "key"), root / "db"))
+        self.connection = self.control.create_connection(
+            "instabox", "Fixture", {"machines": ["fixture-machine"]}, {"read_key": "ibk_fixture"})
+        self.grant, self.token = self.control.create_grant(
+            "fixture-ai", self.connection["id"], ["fixture-machine"], ["instabox_describe"], 300)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def snapshot(self):
+        with self.control.db() as db:
+            return {
+                table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")]
+                for table in ("scoped_connections", "scoped_grants", "scoped_audit")
+            }
+
+    def deny(self, predicate):
+        original = self.control.store._conn
+        def connect():
+            db = original()
+            db.set_authorizer(lambda action, first, second, database, trigger:
+                              sqlite3.SQLITE_DENY if predicate(action, first) else sqlite3.SQLITE_OK)
+            return db
+        return patch.object(self.control.store, "_conn", side_effect=connect)
+
+    def test_local_mutations_and_audit_rollback_together_at_every_boundary(self):
+        operations = {
+            "create_connection": (
+                lambda: self.control.create_connection("instabox", "Second", {"machines": ["second"]},
+                                                       {"read_key": "ibk_second"}),
+                sqlite3.SQLITE_INSERT, "scoped_connections"),
+            "create_grant": (
+                lambda: self.control.create_grant("second-ai", self.connection["id"],
+                                                  ["fixture-machine"], ["instabox_describe"], 120),
+                sqlite3.SQLITE_INSERT, "scoped_grants"),
+            "revoke": (lambda: self.control.revoke(self.grant["id"]),
+                       sqlite3.SQLITE_UPDATE, "scoped_grants"),
+            "disconnect": (lambda: self.control.disconnect(self.connection["id"]),
+                           sqlite3.SQLITE_DELETE, "scoped_connections"),
+            "reissue": (lambda: self.control.reissue_grant(self.grant["id"], 120),
+                        sqlite3.SQLITE_INSERT, "scoped_grants"),
+        }
+        for name, (operation, action, table) in operations.items():
+            for failure in ("business", "audit_before", "audit_after", "audit_prune", "commit"):
+                with self.subTest(operation=name, failure=failure):
+                    before = self.snapshot()
+                    if failure == "business":
+                        fault = self.deny(lambda a, t: a == action and t == table)
+                    elif failure == "commit":
+                        fault = self.deny(lambda a, t: a == sqlite3.SQLITE_TRANSACTION and t == "COMMIT")
+                    elif failure == "audit_prune":
+                        fault = self.deny(lambda a, t: a == sqlite3.SQLITE_DELETE and t == "scoped_audit")
+                    elif failure == "audit_before":
+                        fault = patch.object(self.control, "_write_audit",
+                                             side_effect=RuntimeError("synthetic audit failure"))
+                    else:
+                        original = self.control._write_audit
+                        def write_then_fail(*args):
+                            original(*args)
+                            raise RuntimeError("synthetic failure after audit insert")
+                        fault = patch.object(self.control, "_write_audit", side_effect=write_then_fail)
+                    with fault, self.assertRaises(Exception):
+                        operation()
+                    self.assertEqual(self.snapshot(), before, "Failure must roll back business and audit")
+                    self.assertIsNotNone(self.control.resolve(self.token))
+
+    def test_connection_projection_failure_does_not_commit_a_hidden_connection(self):
+        before = self.snapshot()
+        with patch.object(self.control, "_public", side_effect=RuntimeError("synthetic projection failure")):
+            with self.assertRaises(RuntimeError):
+                self.control.create_connection("instabox", "Second", {"machines": ["second"]},
+                                               {"read_key": "ibk_second"})
+        self.assertEqual(self.snapshot(), before)
+
+    def test_successful_provider_with_unrecorded_outcome_is_never_retried(self):
+        for failure in ("audit", "commit", "projection"):
+            with self.subTest(failure=failure):
+                before = self.snapshot()
+                if failure == "audit":
+                    fault = patch.object(self.control, "_write_audit",
+                                         side_effect=RuntimeError("synthetic-private-error"))
+                elif failure == "projection":
+                    fault = patch.object(self.control, "_redact",
+                                         side_effect=RuntimeError("synthetic-private-error"))
+                else:
+                    fault = self.deny(lambda a, t: a == sqlite3.SQLITE_TRANSACTION and t == "COMMIT")
+                with patch.object(control_module.providers, "call", return_value={"safe": True}) as execute:
+                    with fault, self.assertRaises(control_module.OutcomeUnknown) as caught:
+                        self.control.call(self.token, "instabox_describe", "fixture-machine", {})
+                    execute.assert_called_once()
+                self.assertEqual(caught.exception.outcome, "outcome_unknown")
+                self.assertFalse(caught.exception.retryable)
+                self.assertIn("Do not retry automatically", str(caught.exception))
+                self.assertNotIn("synthetic-private-error", str(caught.exception))
+                self.assertTrue(caught.exception.__suppress_context__)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_provider_failure_and_audit_failure_are_reported_as_unknown(self):
+        before = self.snapshot()
+        with patch.object(control_module.providers, "call", side_effect=RuntimeError("synthetic-private-error")) as execute:
+            with patch.object(self.control, "_write_audit", side_effect=RuntimeError("audit-private-error")):
+                with self.assertRaises(control_module.OutcomeUnknown) as caught:
+                    self.control.call(self.token, "instabox_describe", "fixture-machine", {})
+            execute.assert_called_once()
+        self.assertNotIn("private-error", str(caught.exception))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_connection_health_and_audit_rollback_after_external_test(self):
+        for successful in (True, False):
+            for failure in ("audit", "commit"):
+                with self.subTest(successful=successful, failure=failure):
+                    before = self.snapshot()
+                    options = {"return_value": {"ok": True}} if successful else {
+                        "side_effect": RuntimeError("synthetic-private-provider-error")}
+                    fault = (patch.object(self.control, "_write_audit", side_effect=RuntimeError("audit failure"))
+                             if failure == "audit" else
+                             self.deny(lambda a, t: a == sqlite3.SQLITE_TRANSACTION and t == "COMMIT"))
+                    with patch.object(control_module.providers, "test_connection", **options) as execute:
+                        with fault, self.assertRaises(control_module.OutcomeUnknown):
+                            self.control.test_connection(self.connection["id"])
+                        execute.assert_called_once()
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_long_provider_resources_round_trip_without_expanding_membership(self):
+        settings = {"host": "a" * 256, "port": 65535, "user": "reader",
+                    "host_key": "ssh-ed25519 ZmFrZQ==", "services": ["fixture.service"]}
+        connection = self.control.create_connection("ssh", "Long host", settings, {"private_key": "fixture"})
+        resource = connection["resources"][0]["id"]
+        self.assertEqual(len(resource), 262)
+        grant, token = self.control.create_grant("long-fixture", connection["id"], [resource], ["ssh_status"], 120)
+        self.assertEqual(self.control.resolve(token)["resources"], [resource])
+        self.assertEqual(self.control.discover(grant)[0]["inputSchema"]["properties"]["resource"]["enum"], [resource])
+        with patch.object(control_module.providers, "_process", return_value=(0, b"LoadState=loaded")) as process:
+            self.assertEqual(self.control.call(token, "ssh_status", resource, {"unit": "fixture.service"})["exit_status"], 0)
+            process.assert_called_once()
+        with self.assertRaises(ValueError):
+            self.control.create_grant("invalid-fixture", connection["id"], [resource + "x"], ["ssh_status"], 120)
+        with self.assertRaises(ValueError):
+            self.control.create_grant("invalid-fixture", connection["id"], [resource], ["ssh_logs-extra"], 120)
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,8 +14,8 @@ BASE_URL = os.environ.get("CB_TEST_BASE_URL", "http://127.0.0.1:8765")
 FAKE_SECRET = "ibk_fixture_container_key"
 
 
-def docker(*args, timeout=10):
-    result = subprocess.run(["docker", *args], capture_output=True, timeout=timeout)
+def docker(*args, timeout=10, input_data=None):
+    result = subprocess.run(["docker", *args], input=input_data, capture_output=True, timeout=timeout)
     if result.returncode:
         raise AssertionError("Docker operation failed (output suppressed)")
     return result.stdout
@@ -135,11 +135,12 @@ def main():
         assert FAKE_SECRET not in json.dumps(result)
         # Check storage and exercise an isolated SQLite backup without altering live data.
         validation = """
-import os, shutil, sqlite3, tempfile
+import os, shutil, sqlite3, tempfile, json, sys
 from pathlib import Path
 from cred_broker.store import Store, MasterKey
 from cred_broker.control import Control
 from cred_broker.backup_check import run as check_backup
+fixture = json.load(sys.stdin)
 root = Path(os.environ.get('CB_DATA_DIR','/var/lib/cred-broker'))
 db = Path(os.environ.get('CB_DB_PATH',str(root/'broker.db')))
 key = Path(os.environ.get('CB_MASTER_KEY_PATH',str(root/'master.key')))
@@ -164,10 +165,84 @@ with tempfile.TemporaryDirectory(dir='/tmp') as temp:
     assert check_backup(['--db',str(backup),'--key',str(copied_key)]) == 0
     restored = Control(Store(MasterKey(copied_key),backup))
     assert any(row['label']=='Container test fixture' for row in restored.connections())
+    # Restore the synthetic backup into a complete independent HTTP app.
+    import http.cookiejar, socket, subprocess, sys, time
+    from urllib.request import Request, build_opener, HTTPCookieProcessor, urlopen
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    # Authenticate with the exact grant/token from before the backup.
+    restored_grant_id, restored_token = fixture['grant_id'], fixture['token']
+    assert any(row['id'] == restored_grant_id for row in restored.grants())
+    probe = socket.socket()
+    probe.bind(('127.0.0.1', 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    env = dict(os.environ)
+    env.update(CB_DATA_DIR=temp, CB_DB_PATH=str(backup), CB_MASTER_KEY_PATH=str(copied_key),
+               CB_BIND='127.0.0.1:' + str(port), CB_ALLOWED_ORIGINS='[]', CB_PUBLIC_ORIGIN='')
+    code = (
+        'from unittest.mock import patch; import uvicorn; '
+        'from cred_broker.app import create_app; from cred_broker.config import load_config; '
+        'app=create_app(load_config()); '
+        'fixture=patch("cred_broker.control.providers.call",return_value={"restored":True}); '
+        'fixture.start(); '
+        'uvicorn.run(app,host="127.0.0.1",port=' + str(port) +
+        ',log_level="error",proxy_headers=False)'
+    )
+    child = subprocess.Popen([sys.executable, '-B', '-c', code], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = 'http://127.0.0.1:' + str(port)
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                raise AssertionError('Restored HTTP app exited')
+            try:
+                with urlopen(base + '/healthz', timeout=.5) as response:
+                    if response.status == 200:
+                        break
+            except OSError:
+                time.sleep(.05)
+        else:
+            raise AssertionError('Restored HTTP app did not become healthy')
+        browser = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        with browser.open(Request(base + '/login',
+                data=urlencode({'token': os.environ['CB_ADMIN_TOKEN']}).encode(),
+                headers={'Origin': base}), timeout=3) as response:
+            assert response.status == 200
+        with browser.open(base + '/admin/api/v1/ready', timeout=3) as response:
+            ready = json.load(response)
+            assert ready['storage'] == 'ready'
+            assert ready.get('key_pairing') == 'verified'
+        def restored_rpc(method, params=None):
+            request = Request(base + '/mcp',
+                data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params or {}}).encode(),
+                headers={'Content-Type':'application/json','Authorization':'Bearer '+restored_token})
+            try:
+                with urlopen(request, timeout=3) as response:
+                    return response.status, json.load(response)
+            except HTTPError as error:
+                return error.code, None
+        assert restored_rpc('tools/list')[0] == 200
+        status, result = restored_rpc('tools/call', {
+            'name':'instabox_describe','arguments':{'resource':'fixture-container'}})
+        assert status == 200 and 'true' in result['result']['content'][0]['text'].lower()
+        with browser.open(Request(base + '/admin/api/v1/grants/' + restored_grant_id + '/revoke',
+                data=b'{}', headers={'Content-Type':'application/json','Origin':base}), timeout=3) as response:
+            assert response.status == 200
+        assert restored_rpc('tools/list')[0] == 401
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=3)
 print('storage checks passed')
 """
         inspect()
-        docker("exec", CONTAINER, "python", "-B", "-c", validation, timeout=10)
+        docker("exec", "-i", CONTAINER, "python", "-B", "-c", validation, timeout=30,
+               input_data=json.dumps({"grant_id": grant_id, "token": token}).encode())
         # Recheck exact ownership immediately before the only restart in this test.
         inspect()
         restart_deadline = time.monotonic() + 30
